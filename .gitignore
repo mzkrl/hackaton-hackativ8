@@ -1,0 +1,6 @@
+# aku pake graphify kang
+graphify-out
+
+#barangkali nanti ada kecolongan
+.env
+node_modules
