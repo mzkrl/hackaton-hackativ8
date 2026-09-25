@@ -1,0 +1,17 @@
+{
+  "name": "back",
+  "version": "1.0.50",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev": "bun run --watch src/index.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.3",
+    "elysia": "latest"
+  },
+  "devDependencies": {
+    "bun-types": "latest",
+    "drizzle-kit": "^0.31.11"
+  },
+  "module": "src/index.js"
+}
