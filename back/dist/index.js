@@ -24802,7 +24802,7 @@ var _Elysia = class _Elysia2 {
 var Elysia = _Elysia;
 
 // src/index.ts
-var app = new Elysia().get("/", () => "Hello Elysia");
+var app = new Elysia({ aot: false }).get("/", () => "Hello Elysia");
 if (typeof Bun !== "undefined" && process.env.WORKER !== "1") {
   app.listen(4e3);
   console.log(

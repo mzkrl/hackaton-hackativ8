@@ -1,1 +1,1 @@
-This folder contains the built output assets for the worker "back" generated at 2026-09-25T13:48:24.905Z.
+This folder contains the built output assets for the worker "hackaton-hackativ8-back" generated at 2026-09-25T13:56:36.999Z.

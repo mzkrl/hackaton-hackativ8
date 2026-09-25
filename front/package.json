@@ -4,11 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "build:worker": "next-on-pages",
-    "preview": "next-on-pages && wrangler pages dev",
+    "build": "next build && next-on-pages",
+    "preview": "wrangler pages dev .vercel/output/static",
     "start": "next start",
-    "deploy": "next-on-pages && wrangler pages deploy .vercel/output/static",
+    "deploy": "wrangler pages deploy .vercel/output/static",
     "lint": "eslint"
   },
   "dependencies": {

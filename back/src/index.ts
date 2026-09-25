@@ -1,6 +1,9 @@
 import { Elysia } from "elysia";
 
-const app = new Elysia().get("/", () => "Hello Elysia");
+// aot: false is required for Cloudflare Workers — the runtime forbids
+// code generation from strings (new Function / eval) which Elysia's
+// ahead-of-time compiler uses.
+const app = new Elysia({ aot: false }).get("/", () => "Hello Elysia");
 
 // Local dev with Bun
 if (typeof Bun !== "undefined" && process.env.WORKER !== "1") {
