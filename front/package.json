@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
-    "build:worker": "next-on-pages",
+    "build": "next-on-pages",
+    "build:next": "next build",
     "preview": "wrangler pages dev .vercel/output/static",
     "start": "next start",
     "deploy": "next-on-pages && wrangler deploy",
