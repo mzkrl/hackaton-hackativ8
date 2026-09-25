@@ -8,7 +8,7 @@
     "build:worker": "next-on-pages",
     "preview": "wrangler pages dev .vercel/output/static",
     "start": "next start",
-    "deploy": "wrangler pages deploy .vercel/output/static",
+    "deploy": "next-on-pages && wrangler deploy",
     "lint": "eslint"
   },
   "dependencies": {
