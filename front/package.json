@@ -8,12 +8,14 @@
     "preview": "wrangler pages dev .vercel/output/static",
     "start": "next start",
     "deploy": "next-on-pages && wrangler deploy",
-    "lint": "eslint"
+    "lint": "eslint",
+    "check:result": "bun run scripts/check-result.ts"
   },
   "dependencies": {
     "next": "16.3.6",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@cloudflare/next-on-pages": "^1.13.16",

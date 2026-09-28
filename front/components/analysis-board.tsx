@@ -1,0 +1,121 @@
+"use client";
+
+import { useState } from "react";
+
+import { describeError } from "../lib/api";
+import { getAnalysis, type Analysis } from "../lib/genomics";
+import { AnalysisResultView } from "./analysis-result";
+import { Button, Empty, Notice, Panel, StatusBadge, formatDate } from "./primitives";
+
+/**
+ * Analyses belonging to one project.
+ *
+ * There is no `GET /analyses` endpoint — the API only exposes
+ * `POST /analyses`, `GET /analyses/:id` and `GET /analyses/:id/status` — so the
+ * caller can only know about jobs it submitted itself. The parent owns the list
+ * of ids, polls them, and passes the resulting rows down. This component renders
+ * and can force a refresh; it keeps no analysis state of its own, because a
+ * second copy would drift from the one the parent is polling.
+ */
+export function AnalysisBoard({
+	analyses,
+	sequenceLabels,
+	onRefresh,
+}: {
+	analyses: Analysis[];
+	sequenceLabels: Record<string, string>;
+	onRefresh: () => void;
+}) {
+	return (
+		<Panel
+			title="Analyses"
+			description="Tracked for this session. Status refreshes while a job is queued or processing."
+			actions={
+				<Button onClick={onRefresh} disabled={analyses.length === 0}>
+					Refresh
+				</Button>
+			}
+		>
+			{analyses.length === 0 ? (
+				<Empty>Nothing queued yet. Submit an analysis from a sequence above.</Empty>
+			) : (
+				<ul className="flex flex-col gap-2">
+					{analyses.map((analysis) => (
+						<AnalysisRow
+							key={analysis.id}
+							analysis={analysis}
+							label={sequenceLabels[analysis.sequenceId] ?? "unknown sequence"}
+							onRefresh={onRefresh}
+						/>
+					))}
+				</ul>
+			)}
+		</Panel>
+	);
+}
+
+function AnalysisRow({
+	analysis,
+	label,
+	onRefresh,
+}: {
+	analysis: Analysis;
+	label: string;
+	onRefresh: () => void;
+}) {
+	const [error, setError] = useState<string | null>(null);
+
+	const load = async () => {
+		setError(null);
+		try {
+			// Re-read the full row so a result the worker wrote since the last poll
+			// becomes visible. The parent then replaces the row it holds.
+			await getAnalysis(analysis.id);
+			onRefresh();
+		} catch (caught) {
+			setError(describeError(caught));
+		}
+	};
+
+	return (
+		<li className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+			<div className="flex flex-wrap items-center justify-between gap-2">
+				<div className="min-w-0">
+					<p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+						<span className="font-mono">{analysis.analysisType}</span>
+						<span className="font-normal text-zinc-500"> · {label}</span>
+					</p>
+					<p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+						{formatDate(analysis.createdAt)}
+						{analysis.queueJobId ? ` · job ${analysis.queueJobId.slice(0, 8)}` : ""}
+					</p>
+				</div>
+
+				<div className="flex items-center gap-1.5">
+					<StatusBadge status={analysis.status} />
+					<Button onClick={load}>Reload</Button>
+				</div>
+			</div>
+
+			{analysis.status === "failed" && analysis.errorMessage ? (
+				<div className="mt-2">
+					<Notice tone="error">{analysis.errorMessage}</Notice>
+				</div>
+			) : null}
+
+			{analysis.resultJson ? (
+				<AnalysisResultView
+					resultJson={analysis.resultJson}
+					analysisType={analysis.analysisType}
+					createdAt={analysis.createdAt}
+				/>
+			) : null}
+
+			{error ? (
+				<div className="mt-2">
+					<Notice tone="error">{error}</Notice>
+				</div>
+			) : null}
+		</li>
+	);
+}
