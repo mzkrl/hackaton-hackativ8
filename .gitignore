@@ -9,3 +9,6 @@ node_modules
 # compiled output sitting next to the sources shadows the .ts files at runtime
 back/src/**/*.js
 back/drizzle.config.js
+
+# pm2 writes process logs here
+back/logs/

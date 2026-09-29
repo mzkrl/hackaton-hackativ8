@@ -332,3 +332,43 @@ bun run db:generate      # generate a migration from the schema
 bun run db:migrate       # apply migrations
 bun run db:studio        # Drizzle Studio
 ```
+
+## Running under PM2 on the VPS
+
+`ecosystem.config.cjs` runs both processes as one named set:
+
+```bash
+bun install --production
+bun run db:migrate
+pm2 start ecosystem.config.cjs
+pm2 save
+pm2 startup      # then run the command it prints, so it survives a reboot
+```
+
+| Command | Effect |
+| ------- | ------ |
+| `pm2 status` | Both processes and their restart counts. |
+| `pm2 logs gia-api` / `pm2 logs gia-worker` | Tail one process. |
+| `pm2 reload gia-api` | Graceful handover; the API is stateless. |
+| `pm2 restart gia-worker` | Sends SIGTERM so in-flight jobs drain first. |
+| `pm2 monit` | CPU and memory against the restart thresholds. |
+
+Logs land in `logs/`, which is gitignored.
+
+Two settings in that file are load-bearing rather than cosmetic:
+
+- **`kill_timeout: 120000` on the worker.** `SIGTERM` triggers `await worker.close()`, which
+  waits for running analyses to finish. PM2's default timeout is 1.6s, and a SIGKILL at that
+  point leaves the analysis row in `processing` until BullMQ's stalled-job checker re-queues it
+  minutes later. Use `pm2 restart`, not `pm2 stop`, and do not shorten this without a matching
+  change to the job timeout.
+- **`instances: 1`, no clustering.** Bun does not share a listening socket across PM2 workers, so
+  a cluster would start N processes competing for port 4000 with only one actually listening.
+
+Secrets stay in `.env` (chmod 600), not in the ecosystem file. Bun does not overwrite variables
+that already exist in `process.env`, so the `env` block there wins for operational settings and
+`.env` supplies credentials.
+
+If `pm2 start` reports the process as `errored` with no output, PM2 is not resolving the Bun
+interpreter. Check `which bun`, and fall back to running the entrypoint directly with
+`script: "bun"` plus `args: "run src/index.ts"`.
