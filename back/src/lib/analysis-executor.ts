@@ -1,3 +1,5 @@
+import { UnrecoverableError } from "bullmq";
+
 import type { AnalysisJob } from "./queue";
 
 export type AnalysisOutcome = Record<string, unknown>;
@@ -19,7 +21,11 @@ export const runAnalysis = async (
 	const baseUrl = process.env.BIO_SERVICE_URL?.replace(/\/$/, "");
 
 	if (!baseUrl) {
-		throw new Error(
+		// Unrecoverable, so BullMQ fails the job on the first attempt instead of
+		// retrying. A missing executor cannot become present by trying again, and
+		// retrying it triples the failure log and delays the error surfacing to
+		// the user by the backoff schedule.
+		throw new UnrecoverableError(
 			"BIO_SERVICE_URL is not configured, so no analysis executor is available yet.",
 		);
 	}
