@@ -9,6 +9,8 @@ graphify-out
 
 node_modules
 
+*.md
+
 # Compiled output sitting next to the sources shadows the .ts files at runtime.
 # These are build artefacts; the TypeScript originals are the source of truth.
 back/src/**/*.js
