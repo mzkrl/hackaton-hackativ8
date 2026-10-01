@@ -12,6 +12,7 @@ import {
 	PASSWORD_MIN_LENGTH,
 	verifyPassword,
 } from "../lib/password";
+import { enforce, RATE_LIMITS, requireClientIp } from "../lib/rate-limit";
 import {
 	clearedSessionCookie,
 	isAuthConfigured,
@@ -69,8 +70,14 @@ const invalidCredentials = () =>
 export const authRoutes = new Elysia()
 	.post(
 		"/auth/register",
-		async ({ body, set, status }) => {
+		async ({ request, body, set, status }) => {
 			requireAuthConfigured();
+
+			// Both unauthenticated routes are limited per client address, because
+			// there is no user yet to key on. Register is capped tighter than login
+			// since a single address creating many accounts is the pattern worth
+			// catching early.
+			await enforce(RATE_LIMITS.authRegister(), () => requireClientIp(request));
 
 			const email = normalizeEmail(body.email);
 			const name = body.name.trim();
@@ -106,8 +113,14 @@ export const authRoutes = new Elysia()
 	)
 	.post(
 		"/auth/login",
-		async ({ body, set }) => {
+		async ({ request, body, set }) => {
 			requireAuthConfigured();
+
+			// This is the expensive endpoint: every attempt runs a PBKDF2 verify at
+			// 210k iterations, whether or not the address exists. Without a limit
+			// login is both a brute-force surface and a way to keep a core busy,
+			// so it is capped before any hashing happens.
+			await enforce(RATE_LIMITS.authLogin(), () => requireClientIp(request));
 
 			const email = normalizeEmail(body.email);
 			const [user] = await getDb()

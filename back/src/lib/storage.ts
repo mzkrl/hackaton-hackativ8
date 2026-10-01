@@ -37,10 +37,16 @@ type StorageConfig = {
 };
 
 const readConfig = (): StorageConfig => {
-	const endpoint = process.env.S3_ENDPOINT;
-	const bucket = process.env.S3_BUCKET;
-	const accessKeyId = process.env.S3_ACCESS_KEY_ID;
-	const secretAccessKey = process.env.S3_SECRET_ACCESS_KEY;
+	// Trimmed on read. A `.env` saved with Windows line endings yields
+	// `S3_REGION="us-east-1\r"`, and the stray carriage return is silently
+	// carried into the SDK — where it surfaces much later as an opaque
+	// "Region not accepted" validation error rather than a config problem.
+	const read = (key: string) => process.env[key]?.trim();
+
+	const endpoint = read("S3_ENDPOINT");
+	const bucket = read("S3_BUCKET");
+	const accessKeyId = read("S3_ACCESS_KEY_ID");
+	const secretAccessKey = read("S3_SECRET_ACCESS_KEY");
 
 	if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
 		throw new ApiError(
@@ -55,7 +61,7 @@ const readConfig = (): StorageConfig => {
 		bucket,
 		accessKeyId,
 		secretAccessKey,
-		region: process.env.S3_REGION ?? "us-east-1",
+		region: read("S3_REGION") || "us-east-1",
 	};
 };
 
@@ -70,14 +76,14 @@ const getStorage = () => {
 		config.region,
 		config.accessKeyId,
 		config.secretAccessKey,
-		process.env.S3_FORCE_PATH_STYLE,
+		process.env.S3_FORCE_PATH_STYLE?.trim(),
 	].join("|");
 
 	if (!cachedClient || cachedSignature !== signature) {
 		cachedClient = new S3Client({
 			endpoint: config.endpoint,
 			region: config.region,
-			forcePathStyle: process.env.S3_FORCE_PATH_STYLE !== "false",
+			forcePathStyle: process.env.S3_FORCE_PATH_STYLE?.trim() !== "false",
 			credentials: {
 				accessKeyId: config.accessKeyId,
 				secretAccessKey: config.secretAccessKey,

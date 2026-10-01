@@ -16,7 +16,33 @@ import { readCookie, SESSION_COOKIE, verifySession } from "./session";
 export const resolveUserId = async (request: Request): Promise<string | null> =>
 	verifySession(readCookie(request, SESSION_COOKIE));
 
+/**
+ * Announced once per process, so a shared identity is never invisible.
+ *
+ * The reason this is noisy: the dev fallback used to engage silently whenever a
+ * session cookie was missing. That is indistinguishable from "logged in", which
+ * is how a SameSite mismatch between the frontend host and the API host presents
+ * — register returns 201, every later read returns the dev account, and nothing
+ * anywhere reports an error. Anyone hitting this in a browser should treat it as
+ * a broken session, not a feature.
+ */
+let devIdentityAnnounced = false;
+
+export const warnDevIdentityAtStartup = () => {
+	if (!isDevIdentityAllowed() || devIdentityAnnounced) return;
+
+	devIdentityAnnounced = true;
+	console.warn(
+		"[auth] DEV IDENTITY ENABLED — any request without a valid session cookie is " +
+			`impersonated as ${(process.env.DEV_USER_EMAIL ?? "developer@local.test")
+				.trim()
+				.toLowerCase()}. Never set ALLOW_DEV_AUTH on a public deployment.`,
+	);
+};
+
 const devUserId = async (): Promise<string> => {
+	warnDevIdentityAtStartup();
+
 	const email = (process.env.DEV_USER_EMAIL ?? "developer@local.test")
 		.trim()
 		.toLowerCase();
