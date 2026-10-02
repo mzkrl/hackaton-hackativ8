@@ -1,14 +1,28 @@
 # aku pake graphify kang
 graphify-out
 
-#barangkali nanti ada kecolongan
+# Secrets. Only `.env` itself is ignored — `.env.example` files are config
+# documentation and are meant to be committed.
 .env
+.env.local
+.env.*.local
+
 node_modules
+
 *.md
 
-# compiled output sitting next to the sources shadows the .ts files at runtime
+# Compiled output sitting next to the sources shadows the .ts files at runtime.
+# These are build artefacts; the TypeScript originals are the source of truth.
 back/src/**/*.js
 back/drizzle.config.js
 
 # pm2 writes process logs here
 back/logs/
+
+# Vendored agent tooling, not project source
+back/.agents/
+back/skills-lock.json
+back/.neon
+
+# Artifacts of editing files on the /mnt/windows FUSE mount. They are not source.
+.fuse_hidden*

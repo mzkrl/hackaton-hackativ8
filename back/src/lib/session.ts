@@ -29,7 +29,9 @@ const signingKey = () =>
 	);
 
 const ttlSeconds = () => {
-	const configured = Number(process.env.SESSION_TTL_SECONDS ?? DEFAULT_TTL_SECONDS);
+	const configured = Number(
+		process.env.SESSION_TTL_SECONDS?.trim() || DEFAULT_TTL_SECONDS,
+	);
 	return Number.isInteger(configured) && configured > 0
 		? configured
 		: DEFAULT_TTL_SECONDS;
@@ -137,7 +139,7 @@ export const readCookie = (request: Request, name: string): string | undefined =
  * than left to fail invisibly in the browser.
  */
 const sameSite = (): "Lax" | "None" =>
-	process.env.COOKIE_SAME_SITE === "none" ? "None" : "Lax";
+	process.env.COOKIE_SAME_SITE?.trim().toLowerCase() === "none" ? "None" : "Lax";
 
 const cookieAttributes = (maxAgeSeconds: number) => {
 	const secure = useSecureCookies() || sameSite() === "None";

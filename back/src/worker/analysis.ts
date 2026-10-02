@@ -32,8 +32,10 @@ const markFailed = (analysisId: string, message: string) =>
 		.set({ status: "failed", errorMessage: message.slice(0, 2000), updatedAt: new Date() })
 		.where(eq(analyses.id, analysisId));
 
-const enqueueSecret = process.env.QUEUE_SECRET;
-const enqueuePort = process.env.ENQUEUE_PORT ? Number(process.env.ENQUEUE_PORT) : null;
+const enqueueSecret = process.env.QUEUE_SECRET?.trim();
+const enqueuePort = process.env.ENQUEUE_PORT?.trim()
+	? Number(process.env.ENQUEUE_PORT.trim())
+	: null;
 
 if (enqueuePort && !enqueueSecret) {
 	throw new Error(

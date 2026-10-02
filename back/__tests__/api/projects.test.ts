@@ -25,6 +25,9 @@ describe("project isolation", () => {
 		expect(list.body.data[0].id).toBe(created.body.data.id);
 	});
 
+	// Timeout raised: this case registers two users, creates a project and reads
+	// it back, each a round trip to a remote database, which can exceed Bun's 5s
+	// default on a slow link.
 	test("hides another user's project behind 404", async () => {
 		api.clearSession();
 		await api.createUser("owner-2");
@@ -35,7 +38,7 @@ describe("project isolation", () => {
 
 		expect((await api.request("/projects")).body.data).toHaveLength(0);
 		expect((await api.request(`/projects/${projectId}`)).status).toBe(404);
-	});
+	}, 30_000);
 });
 
 describe("sequence ownership", () => {

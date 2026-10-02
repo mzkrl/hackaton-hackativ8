@@ -4,7 +4,7 @@ import { Elysia, t } from "elysia";
 import { getDb } from "../db/client";
 import { sequences } from "../db/schema";
 import { ApiError, errorBody } from "../lib/api-error";
-import { requireUserId } from "../lib/current-user";
+import { requireUserId, resolveUserId } from "../lib/current-user";
 import {
 	assertProjectOwner,
 	findOwnedSequenceByObjectKey,
@@ -24,6 +24,7 @@ import {
 	putObject,
 	storageIdentity,
 } from "../lib/storage";
+import { enforce, RATE_LIMITS } from "../lib/rate-limit";
 
 const DEFAULT_CONTENT_TYPE = "application/octet-stream";
 
@@ -48,10 +49,19 @@ const requireFormString = (form: FormData, field: string) => {
 };
 
 export const storageRoutes = new Elysia()
-	.get("/storage/health", async ({ set }) => {
+	.get("/storage/health", async ({ request, set }) => {
+		// Unauthenticated on purpose: a health check needs to work before anyone
+		// signs in, and it is what a load balancer or `minio-init` polls. The
+		// bucket name and region are withheld from anonymous callers though —
+		// together they hand an outsider the exact layout of private
+		// infrastructure, which is reconnaissance for no useful reason.
+		const isAuthenticated = (await resolveUserId(request)) !== null;
+
 		try {
 			await assertBucketReachable();
-			return { status: "ok", ...storageIdentity() };
+			return isAuthenticated
+				? { status: "ok", ...storageIdentity() }
+				: { status: "ok" };
 		} catch (error) {
 			if (error instanceof ApiError) {
 				set.status = error.statusCode;
@@ -67,6 +77,12 @@ export const storageRoutes = new Elysia()
 		async ({ request, body, status }) => {
 			const userId = await requireUserId(request);
 			await assertProjectOwner(body.projectId, userId);
+
+			// Presign writes a `sequences` row before the client has uploaded
+			// anything, so this endpoint is an unbounded row writer. Capped per
+			// session-derived user id.
+			await enforce(RATE_LIMITS.storagePresign(), userId);
+
 			assertAllowedFilename(body.filename);
 
 			if (body.sizeBytes !== undefined) {
@@ -105,6 +121,12 @@ export const storageRoutes = new Elysia()
 		"/storage/upload",
 		async ({ request, status }) => {
 			const userId = await requireUserId(request);
+
+			// Before `request.formData()`, which buffers the whole body. The body
+			// size itself is already capped in `app.ts` on Content-Length; this
+			// stops a caller making many separate uploads.
+			await enforce(RATE_LIMITS.storageUpload(), userId);
+
 			const form = await request.formData();
 			const projectId = requireFormString(form, "projectId");
 			const filename = requireFormString(form, "filename");
@@ -166,6 +188,8 @@ export const storageRoutes = new Elysia()
 	})
 	.delete("/storage/*", async ({ request, params }) => {
 		const userId = await requireUserId(request);
+		await enforce(RATE_LIMITS.storageMutate(), userId);
+
 		const objectKey = params["*"];
 		const sequence = await findOwnedSequenceByObjectKey(objectKey, userId);
 

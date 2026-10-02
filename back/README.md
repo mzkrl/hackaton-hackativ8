@@ -62,6 +62,19 @@ an error the browser reports — the cookie is simply never attached, and the ap
 the session expired on every single call. `COOKIE_SAME_SITE=none` implies `Secure` automatically,
 because browsers reject `SameSite=None` without it.
 
+The same trap has a local form, and it is easy to fall into. A browser treats `localhost` and
+`127.0.0.1` as two **different sites**, not one host on two ports. So a page on
+`http://localhost:3000` pointing at `http://127.0.0.1:4000` loses the cookie on every request even
+though it looks like a loopback call to the same machine. Keep the hostname identical on both
+sides — `http://localhost:4000`.
+
+This failure is especially nasty in development, because `ALLOW_DEV_AUTH` catches the missing
+cookie and signs the caller in as the shared dev user. Registration returns `201`, and every
+later read comes back as `developer@local.test`, so it looks like sign-in works while all your
+data lands on one shared account. On the VPS, where dev auth is off, the identical configuration
+produces a `401` on every request instead. If sign-up appears to do nothing, compare the two
+hostnames before anything else.
+
 There is no serverless or edge deployment target. The database client speaks TCP through
 `postgres.js`, and a TCP connection cannot be held by a request-scoped runtime, so the API
 must be a long-lived process behind a hostname.
@@ -142,6 +155,55 @@ Ownership is always resolved from a server-side record. The API never accepts a 
 or role from the client, `object_key` can only be set by the storage endpoints, and
 `queue_job_id` / analysis `status` are worker-owned. Supplying any of them is rejected with `422`.
 
+## Rate limiting
+
+Fixed-window counters held in Redis, applied to the endpoints that are either expensive or
+unbounded writers. The counters are **shared state** on purpose: an in-process `Map` would give
+each API instance its own budget, so the real limit would be the configured one multiplied by the
+number of processes, and a restart would hand everyone a fresh allowance.
+
+| Scope              | Keyed by     | Default  | Why                                       |
+| ------------------ | ------------ | -------- | ----------------------------------------- |
+| `auth.login`       | client       | 10 / 15m | Each attempt costs a 210k-iteration hash. |
+| `auth.register`    | client       | 5 / 1h   | One address creating many accounts.       |
+| `analysis.queue`   | session user | 30 / 1h  | Each is a row, a Redis entry, and a job.  |
+| `storage.presign`  | session user | 60 / 1h  | Writes a `sequences` row before upload.   |
+| `storage.upload`   | session user | 30 / 1h  | Real bytes to object storage.             |
+| `storage.mutate`   | session user | 60 / 1h  | Deletes, and the objects behind them.     |
+
+Authenticated scopes are keyed on the **session-derived user id**, never on anything the caller
+supplied, so one account exhausting its budget cannot throttle another.
+
+Set any `RATE_LIMIT_*` to `0` to disable that rule. Tune with the matching
+`RATE_LIMIT_*_WINDOW_SECONDS`.
+
+Two deliberate behaviours:
+
+- **It fails closed.** If Redis is unreachable the limiter cannot do its job, so the request is
+  refused with `503 RATE_LIMIT_UNAVAILABLE` rather than waved through. A limiter that fails open is
+  not a limiter. That code is distinct from a `429`, so the UI can tell "you are being throttled"
+  apart from "the throttle is broken".
+- **It refuses an unattributable caller.** The login and register rules need to know who is calling.
+  With no `TRUSTED_IP_HEADER` configured they return `503` instead of collapsing every caller into
+  one bucket, which would let a single noisy client throttle everyone. Locally, set
+  `RATE_LIMIT_FALLBACK_TO_UNKNOWN=1` to accept the shared bucket — convenient, wrong in production.
+
+`429` responses carry a `Retry-After` header and `details.retryAfter` in the body.
+
+The window is fixed, not sliding: retries inside a window do not extend it, so a client that keeps
+hammering is still let go when the window ends.
+
+## Analysis types
+
+`POST /analyses` validates `analysisType` against a closed set. It used to accept any 1–64 character
+string and forward it verbatim to the analysis service, which meant the value an internal service
+was handed had effectively been chosen by the client. An unknown type is now a `422`, raised before
+any row is written.
+
+Defaults live in `back/src/lib/analysis-types.ts` and come from AGENTS.md §4.10. Override with
+`ANALYSIS_ALLOWED_TYPES=gc_content,orfs,blast`. An empty or malformed value falls back to the
+defaults rather than rejecting everything, so a missing config cannot end up wide open.
+
 ## Importing guest history
 
 `POST /guest/import` moves a guest's IndexedDB history into their new account, so registering
@@ -194,6 +256,7 @@ does not throw away prior work.
 | POST   | `/projects/:id/sequences`        | Register a metadata-only sequence (pasted text).    |
 | GET    | `/projects/:id/sequences`        | List sequences in a project.                        |
 | POST   | `/analyses`                      | Queue an analysis; returns `202` immediately.       |
+| GET    | `/queue/status`                  | Queue depth and worker reachability.                |
 | GET    | `/analyses/:id`                  | Fetch one analysis.                                 |
 | GET    | `/analyses/:id/status`           | Poll analysis status.                               |
 | POST   | `/conversations`                 | Append a conversation message.                      |
@@ -205,8 +268,9 @@ does not throw away prior work.
 | DELETE | `/storage/*`                     | Delete an owned object and detach it.               |
 
 Successful responses are `{ "data": ... }`. Errors are `{ "error": { "code", "message", "details"? } }`
-with `404` for missing or unowned resources, `413` for oversized files, `422` for validation
-failures, `503` when the queue is unavailable, and `401` when auth is required.
+with `404` for missing or unowned resources, `413` for oversized bodies or files, `422` for
+validation failures, `429` when a rate limit is hit, `503` when the queue, rate limiter or object
+storage is unavailable, and `401` when auth is required.
 
 ## Uploading a research file
 
@@ -299,6 +363,30 @@ TEST_API_URL=http://127.0.0.1:4100 bun test
 `NODE_ENV=production` matters: it disables the development identity fallback, so the fail-closed
 auth tests actually exercise signature rejection instead of silently falling back to the shared
 local user.
+
+Disable the rate limits for the run as well. The suite registers a user per test and every
+`createClient()` call is a fresh account, so a real budget is exhausted within a few passes — and
+because the tests all come from one address, they also share one bucket:
+
+```bash
+RATE_LIMIT_AUTH_REGISTER=0 RATE_LIMIT_AUTH_LOGIN=0 RATE_LIMIT_ANALYSIS_QUEUE=0 \
+RATE_LIMIT_STORAGE_PRESIGN=0 RATE_LIMIT_STORAGE_UPLOAD=0 RATE_LIMIT_STORAGE_MUTATE=0 \
+  bun run src/index.ts
+```
+
+`RATE_LIMIT_*=0` skips a rule entirely, including the caller-identity requirement, so the tests
+do not need `TRUSTED_IP_HEADER` set. See **Rate limiting** below for the production values.
+
+Two tests reach external services and carry raised timeouts for that reason: the object-storage
+round trip and anything that submits an analysis. Both talk to the VPS over the network, so they
+can exceed Bun's 5s default on a slow link.
+
+One caveat worth knowing when reading failures: this Redis is shared with the deployed worker, and
+`queue.test.ts` asserts on rows in the shared queue. The worker can move a freshly submitted job
+to `processing` or `failed` before the test reads it back — in this deployment it does, because
+`BIO_SERVICE_URL` is unset and every job fails fast. So the suite asserts a job is *in* the
+lifecycle and that its `queue_job_id` is set, rather than pinning the exact status. A `failed`
+there is expected, not a regression.
 
 Layout mirrors the other project in this workspace:
 

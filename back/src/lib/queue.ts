@@ -14,7 +14,7 @@ export type AnalysisJob = {
 const DEFAULT_ATTEMPTS = 3;
 
 export const isQueueConfigured = () =>
-	Boolean(process.env.REDIS_URL) || Boolean(process.env.QUEUE_ENQUEUE_URL);
+	Boolean(process.env.REDIS_URL?.trim()) || Boolean(process.env.QUEUE_ENQUEUE_URL?.trim());
 
 export const assertQueueConfigured = () => {
 	if (!isQueueConfigured()) {
@@ -27,7 +27,7 @@ export const assertQueueConfigured = () => {
 };
 
 const producerConnection = (): ConnectionOptions => {
-	const url = process.env.REDIS_URL;
+	const url = process.env.REDIS_URL?.trim();
 	if (!url) {
 		throw new ApiError(
 			503,
@@ -46,7 +46,7 @@ const producerConnection = (): ConnectionOptions => {
 };
 
 export const workerConnection = (): ConnectionOptions => {
-	const url = process.env.REDIS_URL;
+	const url = process.env.REDIS_URL?.trim();
 	if (!url) {
 		throw new Error("REDIS_URL is required to run the analysis worker.");
 	}
@@ -55,12 +55,12 @@ export const workerConnection = (): ConnectionOptions => {
 };
 
 export const workerConcurrency = () => {
-	const parsed = Number(process.env.WORKER_CONCURRENCY ?? 2);
+	const parsed = Number(process.env.WORKER_CONCURRENCY?.trim() || 2);
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : 2;
 };
 
 const queueAttempts = () => {
-	const parsed = Number(process.env.QUEUE_ATTEMPTS ?? DEFAULT_ATTEMPTS);
+	const parsed = Number(process.env.QUEUE_ATTEMPTS?.trim() || DEFAULT_ATTEMPTS);
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_ATTEMPTS;
 };
 
@@ -72,6 +72,28 @@ const jobOptions = () => ({
 });
 
 let queuePromise: Promise<BullQueue<AnalysisJob>> | undefined;
+
+/**
+ * Drops the cached producer so the next call builds a fresh one.
+ *
+ * `producerConnection` sets `retryStrategy: () => null`, which is right for a
+ * request path — a broken Redis should fail fast rather than pile up
+ * reconnects. But it also means a cached `Queue` stays permanently dead once
+ * its socket drops. Without this reset the API would stay permanently unable to
+ * enqueue, even after Redis came back, until the process was restarted.
+ */
+const discardProducerQueue = async () => {
+	const pending = queuePromise;
+	queuePromise = undefined;
+
+	if (!pending) return;
+
+	await pending
+		.then((queue) => queue.close())
+		.catch(() => {
+			// Nothing to close if it never resolved.
+		});
+};
 
 const getProducerQueue = async () => {
 	if (!queuePromise) {
@@ -93,8 +115,8 @@ const getProducerQueue = async () => {
 };
 
 const enqueueViaHttp = async (job: AnalysisJob) => {
-	const baseUrl = process.env.QUEUE_ENQUEUE_URL;
-	const secret = process.env.QUEUE_SECRET;
+	const baseUrl = process.env.QUEUE_ENQUEUE_URL?.trim();
+	const secret = process.env.QUEUE_SECRET?.trim();
 
 	if (!baseUrl) {
 		throw new ApiError(
@@ -141,14 +163,86 @@ const enqueueViaHttp = async (job: AnalysisJob) => {
 	return payload.jobId;
 };
 
+/**
+ * A point-in-time view of the queue, for monitoring and for the frontend.
+ *
+ * Counts are informational: `waiting` and `delayed` describe work not yet
+ * started, `active` is work in progress, and the failed count is the retained
+ * failures. None of this is an authorisation input.
+ */
+export type QueueStatus = {
+	configured: boolean;
+	queue: string;
+	waiting: number;
+	active: number;
+	delayed: number;
+	failed: number;
+	completed: number;
+	reachable: boolean;
+};
+
+export const queueStatus = async (): Promise<QueueStatus> => {
+	const base: QueueStatus = {
+		configured: isQueueConfigured(),
+		queue: ANALYSIS_QUEUE,
+		waiting: 0,
+		active: 0,
+		delayed: 0,
+		failed: 0,
+		completed: 0,
+		reachable: false,
+	};
+
+	// The HTTP-only deployment keeps its counters on the worker, so there is
+	// nothing to read here.
+	if (!isQueueConfigured() || process.env.QUEUE_ENQUEUE_URL?.trim()) {
+		return base;
+	}
+
+	try {
+		const queue = await getProducerQueue();
+		const counts = await queue.getJobCounts(
+			"waiting",
+			"active",
+			"delayed",
+			"failed",
+			"completed",
+		);
+
+		return {
+			...base,
+			waiting: counts.waiting ?? 0,
+			active: counts.active ?? 0,
+			delayed: counts.delayed ?? 0,
+			failed: counts.failed ?? 0,
+			completed: counts.completed ?? 0,
+			reachable: true,
+		};
+	} catch (error) {
+		console.error("[queue] status probe failed:", error);
+		// Reset the cached producer: the connection options never retry, so
+		// keeping it would leave the API permanently unable to enqueue even after
+		// Redis recovers.
+		await discardProducerQueue();
+		return base;
+	}
+};
+
 export const enqueueAnalysis = async (job: AnalysisJob) => {
-	if (process.env.QUEUE_ENQUEUE_URL) return enqueueViaHttp(job);
+	if (process.env.QUEUE_ENQUEUE_URL?.trim()) return enqueueViaHttp(job);
 
-	const queue = await getProducerQueue();
-	const added = await queue.add(ANALYSIS_QUEUE, job, {
-		...jobOptions(),
-		jobId: job.analysisId,
-	});
+	// Same reasoning as the status probe: a dead cached producer is discarded so
+	// a transient Redis outage does not permanently disable the queue.
+	try {
+		const queue = await getProducerQueue();
+		const added = await queue.add(ANALYSIS_QUEUE, job, {
+			...jobOptions(),
+			jobId: job.analysisId,
+		});
 
-	return added.id ?? job.analysisId;
+		return added.id ?? job.analysisId;
+	} catch (error) {
+		await discardProducerQueue();
+		throw error;
+	}
 };

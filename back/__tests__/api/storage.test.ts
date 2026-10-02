@@ -22,6 +22,10 @@ describe("object storage", () => {
 		expect(result.body.bucket).toBe(process.env.S3_BUCKET);
 	});
 
+	// Generous timeout: this is the only test that makes a real external call to
+	// object storage several times, over a network hop to the VPS. The default
+	// Bun timeout is too tight for it on a slow link, which showed up as an
+	// intermittent failure rather than an honest one.
 	test("round-trips an object through upload, presigned GET, and delete", async () => {
 		api.clearSession();
 		await api.createUser("storage-roundtrip");
