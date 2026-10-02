@@ -4,9 +4,11 @@ import { Elysia, t } from "elysia";
 import { getDb } from "../db/client";
 import { analyses } from "../db/schema";
 import { ApiError } from "../lib/api-error";
+import { assertAllowedAnalysisType } from "../lib/analysis-types";
 import { requireUserId } from "../lib/current-user";
 import { findOwnedAnalysis, findOwnedSequence } from "../lib/ownership";
-import { assertQueueConfigured, enqueueAnalysis } from "../lib/queue";
+import { assertQueueConfigured, enqueueAnalysis, queueStatus } from "../lib/queue";
+import { enforce, RATE_LIMITS } from "../lib/rate-limit";
 
 const analysisParams = t.Object({ id: t.String({ format: "uuid" }) });
 
@@ -35,13 +37,22 @@ export const analysesRoutes = new Elysia()
 			const userId = await requireUserId(request);
 			const sequence = await findOwnedSequence(body.sequenceId, userId);
 
+			// Keyed on the session-derived user id, not on anything the caller
+			// supplied. Each queued job is a row plus a Redis entry and eventually a
+			// Bio Service call, so an unbounded submit loop is what this stops.
+			await enforce(RATE_LIMITS.analysisQueue(), userId);
+
+			// Checked before the row is written, so an unknown type never becomes
+			// a durable record or reaches the worker.
+			const analysisType = assertAllowedAnalysisType(body.analysisType);
+
 			assertQueueConfigured();
 
 			const [created] = await getDb()
 				.insert(analyses)
 				.values({
 					sequenceId: sequence.id,
-					analysisType: body.analysisType,
+					analysisType,
 					status: "queued",
 				})
 				.returning();
@@ -51,7 +62,7 @@ export const analysesRoutes = new Elysia()
 					analysisId: created.id,
 					sequenceId: sequence.id,
 					projectId: sequence.projectId,
-					analysisType: body.analysisType,
+					analysisType,
 				});
 
 				const [queued] = await getDb()
@@ -92,6 +103,19 @@ export const analysesRoutes = new Elysia()
 		},
 		{ params: analysisParams },
 	)
+	.get("/queue/status", async ({ set }) => {
+			// Public by design: a monitor needs queue depth before anyone signs in,
+			// and the counts expose no user data. Observability only — never a gate.
+			const status = await queueStatus();
+
+			// Configured but not answering is a genuine fault, unlike "not
+			// configured", which is a valid state for an API-only deployment.
+			if (!status.reachable && status.configured) {
+				set.status = 503;
+			}
+
+			return { data: status };
+		})
 	.get(
 		"/analyses/:id/status",
 		async ({ request, params }) => {
