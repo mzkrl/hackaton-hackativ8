@@ -3,6 +3,12 @@ import { Elysia } from "elysia";
 
 import { getDb } from "./db/client";
 import { ApiError, errorBody } from "./lib/api-error";
+import {
+	checkAnalysisDependencies,
+	dependenciesReady,
+} from "./lib/analysis-dependencies";
+import { requireUserId, warnDevIdentityAtStartup } from "./lib/current-user";
+import { MAX_BACKEND_UPLOAD_BYTES } from "./lib/storage";
 import { analysesRoutes } from "./routes/analyses";
 import { authRoutes } from "./routes/auth";
 import { conversationsRoutes } from "./routes/conversations";
@@ -78,6 +84,30 @@ export const createApp = () => {
 				set.status = 503;
 				return { status: "degraded", database: "unavailable" };
 			}
+		})
+		/**
+		 * Reports whether the analysis pipeline can actually reach the services it
+		 * depends on.
+		 *
+		 * Deliberately authenticated and deliberately never fails: the response is
+		 * `ok` even when a dependency is down, because the caller wants the detail,
+		 * not an error. It also never echoes a secret, only whether one is present.
+		 *
+		 * This exists so a wrong host or a 404 webhook can be spotted before it
+		 * shows up as an analysis that silently never completes. Those services live
+		 * outside this process, so nothing else in the app would reveal them.
+		 */
+		.get("/health/dependencies", async ({ request }) => {
+			await requireUserId(request);
+
+			const dependencies = await checkAnalysisDependencies();
+			const ready = dependenciesReady(dependencies);
+
+			return {
+				status: ready ? "ok" : "degraded",
+				ready,
+				dependencies,
+			};
 		})
 		.use(authRoutes)
 		.use(guestRoutes)

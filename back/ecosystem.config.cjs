@@ -72,7 +72,12 @@ module.exports = {
 			// kill timeout is 1.6s, which SIGKILLs mid-analysis and leaves the
 			// analysis row stuck in `processing` until BullMQ's stalled-job
 			// checker notices and re-queues it. Give the drain real time.
-			kill_timeout: 120_000,
+			//
+			// 5 minutes, not 2: a job that reaches Langflow makes two model
+			// calls plus the FASTA parse, so a run can comfortably outlast a
+			// shorter window. Keep this at or above the request timeout the
+			// worker uses, or a restart will cut live jobs short.
+			kill_timeout: 300_000,
 			max_memory_restart: "800M",
 			out_file: "logs/worker-out.log",
 			error_file: "logs/worker-error.log",

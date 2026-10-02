@@ -5,6 +5,7 @@ graphify-out
 .env
 node_modules
 *.md
+!CONNECTION.md
 
 # compiled output sitting next to the sources shadows the .ts files at runtime
 back/src/**/*.js
