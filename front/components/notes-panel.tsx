@@ -56,17 +56,17 @@ export function NotesPanel({
 								className={cx(
 									"rounded-lg border px-3 py-2",
 									message.role === "user"
-										? "border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-950"
-										: "border-zinc-200 bg-white dark:border-zinc-800 dark:bg-zinc-900",
+										? "border-line bg-shell dark:border-night-line dark:bg-night"
+										: "border-line bg-paper dark:border-night-line dark:bg-night-raised",
 								)}
 							>
 								<p className="flex items-baseline gap-2">
-									<span className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+									<span className="text-[11px] font-semibold uppercase tracking-wide text-muted">
 										{message.role}
 									</span>
-									<span className="text-[11px] text-zinc-400">{formatDate(message.createdAt)}</span>
+									<span className="text-[11px] text-muted">{formatDate(message.createdAt)}</span>
 								</p>
-								<p className="mt-1 whitespace-pre-wrap break-words text-sm text-zinc-800 dark:text-zinc-200">
+								<p className="mt-1 whitespace-pre-wrap break-words text-sm text-forest dark:text-night-text">
 									{message.content}
 								</p>
 							</li>
@@ -98,9 +98,9 @@ export function NotesPanel({
 							onChange={(e) => setRole(e.target.value)}
 							disabled={busy}
 							className={cx(
-								"rounded-lg border border-zinc-300 bg-white px-2 py-1.5 text-xs",
-								"focus:border-zinc-500 focus:outline-none disabled:opacity-50",
-								"dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100",
+								"rounded-lg border border-line-strong bg-paper px-2 py-1.5 text-xs",
+								"focus:border-teal-ink disabled:opacity-50",
+								"dark:border-night-line dark:bg-night dark:text-night-text",
 							)}
 						>
 							<option value="user">user</option>

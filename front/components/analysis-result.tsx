@@ -14,9 +14,13 @@ const CompositionChart = dynamic(
 	() => import("./composition-chart").then((mod) => mod.CompositionChart),
 	{
 		ssr: false,
+		// A placeholder at the chart's own height, so the panel does not grow when
+		// the real chart arrives and the axes can settle.
 		loading: () => (
-			<div className="flex h-56 items-center justify-center text-xs text-zinc-400">
-				Loading chart…
+			<div className="flex h-56 w-full items-end gap-3 px-2 pb-4">
+				{[70, 55, 40, 32].map((height) => (
+					<div key={height} className="skeleton flex-1 rounded-t" style={{ height: `${height}%` }} />
+				))}
 			</div>
 		),
 	},
@@ -44,7 +48,7 @@ export function AnalysisResultView({
 	const hasKnown = !result.empty;
 
 	return (
-		<div className="mt-3 flex flex-col gap-3 border-t border-zinc-200 pt-3 dark:border-zinc-800">
+		<div className="mt-3 flex flex-col gap-3 border-t border-line pt-3 dark:border-night-line">
 			{result.record ? <RecordCard record={result.record} /> : null}
 
 			{result.gcContent !== undefined || derived !== undefined ? (
@@ -76,11 +80,11 @@ export function AnalysisResultView({
 			) : null}
 
 			{Object.keys(result.extra).length > 0 ? (
-				<details className="rounded-lg border border-zinc-200 dark:border-zinc-800">
-					<summary className="cursor-pointer px-3 py-2 text-xs font-medium text-zinc-600 dark:text-zinc-300">
+				<details className="rounded-lg border border-line dark:border-night-line">
+					<summary className="cursor-pointer px-3 py-2 text-xs font-medium text-muted dark:text-night-muted">
 						Other fields ({Object.keys(result.extra).join(", ")})
 					</summary>
-					<pre className="overflow-auto border-t border-zinc-200 p-3 text-[11px] dark:border-zinc-800">
+					<pre className="overflow-auto border-t border-line p-3 text-[11px] dark:border-night-line">
 						{JSON.stringify(result.extra, null, 2)}
 					</pre>
 				</details>
@@ -88,18 +92,18 @@ export function AnalysisResultView({
 
 			{/* Nothing the renderers claimed. Show the payload rather than nothing. */}
 			{hasKnown ? null : (
-				<pre className="max-h-64 overflow-auto rounded-lg bg-zinc-50 p-3 text-[11px] leading-relaxed text-zinc-800 dark:bg-zinc-950 dark:text-zinc-200">
+				<pre className="max-h-64 overflow-auto rounded-lg bg-shell p-3 text-[11px] leading-relaxed text-forest dark:bg-night dark:text-night-text">
 					{JSON.stringify(resultJson, null, 2)}
 				</pre>
 			)}
 
-			<p className="text-[11px] leading-relaxed text-zinc-400">
+			<p className="text-[11px] leading-relaxed text-muted">
 				Computed by a deterministic tool. AI interpretation, where present, is a
 				reasoning layer over these numbers, not the source of them. For research
 				and education only — not a clinical or diagnostic tool.
 			</p>
 
-			<p className="text-[11px] text-zinc-400">
+			<p className="text-[11px] text-muted">
 				{analysisType} · submitted {formatDate(createdAt)}
 			</p>
 		</div>
@@ -108,15 +112,15 @@ export function AnalysisResultView({
 
 function RecordCard({ record }: { record: NonNullable<AnalysisResult["record"]> }) {
 	return (
-		<div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
-			<p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+		<div className="rounded-lg border border-line p-3 dark:border-night-line">
+			<p className="text-xs font-semibold text-forest dark:text-night-text">
 				{record.id ?? "Unnamed record"}
 			</p>
 			{record.description ? (
-				<p className="mt-0.5 text-xs text-zinc-600 dark:text-zinc-300">{record.description}</p>
+				<p className="mt-0.5 text-xs text-muted dark:text-night-muted">{record.description}</p>
 			) : null}
 			{record.length !== undefined ? (
-				<p className="mt-1 text-xs text-zinc-500">
+				<p className="mt-1 text-xs text-muted">
 					{record.length.toLocaleString()} nucleotides
 				</p>
 			) : null}
@@ -140,20 +144,20 @@ function GcCard({ reported, derived }: { reported?: number; derived?: number }) 
 	const width = Math.min(100, Math.max(0, value));
 
 	return (
-		<div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+		<div className="rounded-lg border border-line p-3 dark:border-night-line">
 			<div className="flex items-baseline justify-between">
-				<p className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">GC content</p>
-				<p className="font-mono text-lg font-semibold text-zinc-900 dark:text-zinc-50">
+				<p className="text-xs font-semibold text-forest dark:text-night-text">GC content</p>
+				<p className="font-mono text-lg font-semibold text-forest dark:text-night-text">
 					{value.toFixed(1)}%
 				</p>
 			</div>
-			<div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+			<div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-line dark:bg-night-raised">
 				<div
 					className="h-full rounded-full bg-emerald-500"
 					style={{ width: `${width}%` }}
 				/>
 			</div>
-			<p className="mt-1.5 text-[11px] text-zinc-500">
+			<p className="mt-1.5 text-[11px] text-muted">
 				{isDerived
 					? "Derived from the base counts; the tool did not report this figure."
 					: "Reported by the analysis tool."}
@@ -166,7 +170,7 @@ function OrfTable({ rows }: { rows: NonNullable<AnalysisResult["orfs"]> }) {
 	return (
 		<div className="overflow-x-auto">
 			<table className="w-full text-left text-xs">
-				<thead className="text-zinc-500">
+				<thead className="text-muted">
 					<tr>
 						<th className="py-1 pr-3 font-medium">Strand</th>
 						<th className="py-1 pr-3 font-medium">Frame</th>
@@ -176,15 +180,15 @@ function OrfTable({ rows }: { rows: NonNullable<AnalysisResult["orfs"]> }) {
 						<th className="py-1 font-medium">Codons</th>
 					</tr>
 				</thead>
-				<tbody className="font-mono text-zinc-700 dark:text-zinc-200">
+				<tbody className="font-mono text-forest dark:text-night-text">
 					{rows.map((orf, index) => (
-						<tr key={`${orf.start}-${index}`} className="border-t border-zinc-100 dark:border-zinc-800">
+						<tr key={`${orf.start}-${index}`} className="border-t border-line dark:border-night-line">
 							<td className="py-1 pr-3">{orf.strand ?? "—"}</td>
 							<td className="py-1 pr-3">{orf.frame ?? "—"}</td>
 							<td className="py-1 pr-3">{orf.start?.toLocaleString() ?? "—"}</td>
 							<td className="py-1 pr-3">{orf.end?.toLocaleString() ?? "—"}</td>
 							<td className="py-1 pr-3">{orf.length?.toLocaleString() ?? "—"}</td>
-							<td className="py-1 text-zinc-500">
+							<td className="py-1 text-muted">
 								{orf.startCodon ?? "—"}
 								{orf.stopCodon ? ` … ${orf.stopCodon}` : ""}
 							</td>
@@ -202,7 +206,7 @@ function HitTable({ rows }: { rows: NonNullable<AnalysisResult["blastHits"]> }) 
 	return (
 		<div className="overflow-x-auto">
 			<table className="w-full text-left text-xs">
-				<thead className="text-zinc-500">
+				<thead className="text-muted">
 					<tr>
 						<th className="py-1 pr-3 font-medium">Accession</th>
 						<th className="py-1 pr-3 font-medium">Identity</th>
@@ -210,9 +214,9 @@ function HitTable({ rows }: { rows: NonNullable<AnalysisResult["blastHits"]> }) 
 						<th className="py-1 font-medium">Bit score</th>
 					</tr>
 				</thead>
-				<tbody className="font-mono text-zinc-700 dark:text-zinc-200">
+				<tbody className="font-mono text-forest dark:text-night-text">
 					{rows.map((hit, index) => (
-						<tr key={hit.accession ?? index} className="border-t border-zinc-100 dark:border-zinc-800">
+						<tr key={hit.accession ?? index} className="border-t border-line dark:border-night-line">
 							<td className="py-1 pr-3">{hit.accession ?? "—"}</td>
 							<td
 								className={cx(

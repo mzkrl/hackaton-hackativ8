@@ -126,11 +126,11 @@ function SequenceRow({
 	const label = sequence.originalFilename ?? sequence.recordId ?? "pasted sequence";
 
 	return (
-		<li className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+		<li className="rounded-lg border border-line p-3 dark:border-night-line">
 			<div className="flex flex-wrap items-start justify-between gap-2">
 				<div className="min-w-0">
-					<p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">{label}</p>
-					<p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+					<p className="truncate text-sm font-medium text-forest dark:text-night-text">{label}</p>
+					<p className="mt-0.5 text-xs text-muted dark:text-night-muted">
 						<span className="font-medium">{sequence.format}</span>
 						{sequence.sequenceLength !== null
 							? ` · ${sequence.sequenceLength.toLocaleString()} residues`
@@ -140,7 +140,7 @@ function SequenceRow({
 						{formatDate(sequence.createdAt)}
 					</p>
 					{sequence.description ? (
-						<p className="mt-1 text-xs text-zinc-600 dark:text-zinc-300">{sequence.description}</p>
+						<p className="mt-1 text-xs text-muted dark:text-night-muted">{sequence.description}</p>
 					) : null}
 				</div>
 
@@ -150,7 +150,7 @@ function SequenceRow({
 							<Button onClick={download} disabled={busy}>
 								Download
 							</Button>
-							<Button variant="danger" onClick={remove} disabled={busy}>
+							<Button variant="accent" onClick={remove} disabled={busy}>
 								Delete
 							</Button>
 						</>
@@ -168,9 +168,9 @@ function SequenceRow({
 					onChange={(e) => setAnalysisType(e.target.value)}
 					disabled={busy || !canQueue}
 					className={cx(
-						"rounded-lg border border-zinc-300 bg-white px-2 py-1.5 font-mono text-xs",
-						"focus:border-zinc-500 focus:outline-none disabled:opacity-50",
-						"dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100",
+						"rounded-lg border border-line-strong bg-paper px-2 py-1.5 font-mono text-xs",
+						"focus:border-teal-ink disabled:opacity-50",
+						"dark:border-night-line dark:bg-night dark:text-night-text",
 					)}
 				>
 					{SUGGESTED_ANALYSES.map((value) => (

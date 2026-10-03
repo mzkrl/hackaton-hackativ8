@@ -1,26 +1,295 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/* ------------------------------------------------------------------ fonts -- */
 
+/*
+ * One family, for everything except sequences.
+ *
+ *   --font-sans     Nunito        the whole app. The brief fixes it by name and
+ *                                  weight set: 400 body, 600 emphasis, 700 the
+ *                                  sidebar title and the logo, 800 the headline.
+ *                                  It is a rounded sans, which is why the logo
+ *                                  tracking below is wide -- Nunito's own
+ *                                  proportions need the air.
+ *   --font-mono     system stack  sequences, counts, accessions. Not loaded as a
+ *                                  webfont on purpose: nothing in the brief asks
+ *                                  for a third family, and a data column is the
+ *                                  one place where the OS mono is already right.
+ *
+ * `--font-display` is an alias rather than a second family. The call sites were
+ * written when the heading was a serif; renaming every one of them to restate
+ * that it is not would be churn for no change in what renders.
+ *
+ * `inline` because each points at a variable next/font writes onto <body>; the
+ * utility has to read the value at use time rather than capture it here.
+ */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+	--font-display: var(--font-nunito), ui-sans-serif, system-ui, sans-serif;
+	--font-sans: var(--font-nunito), ui-sans-serif, system-ui, sans-serif;
+	--font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+/* --------------------------------------------------------- light-only app -- */
+
+/*
+ * This app has one theme. Tailwind's `dark:` variant is redefined away from its
+ * default `prefers-color-scheme: dark` media query to a `.dark` class that
+ * nothing in this app ever sets, so those utilities still compile but can never
+ * match.
+ *
+ * This is the one line standing between a visitor whose OS is set to dark and a
+ * dark teal page. Leave it in: without it, `dark:bg-night` on any wrapper wins
+ * over the cream on `html, body` below, which is exactly the bug it is here to
+ * prevent. The `dark:` classes themselves are dead weight and can be stripped
+ * in a separate pass if that is ever wanted.
+ */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ----------------------------------------------------------------- tokens -- */
+
+@theme {
+	/* ---------------------------------------------------------- brand --- */
+	/*
+	 * The palette, used verbatim. Everything below is derived from these.
+	 *
+	 *   #FFEBCB cream   every surface, and the text colour on the two filled
+	 *                    colours below. It is the page background, not a card.
+	 *   #023436 forest  the default text colour, and the Login fill
+	 *   #601700 maroon  the drop zone rule and the composer bar
+	 *   #21A179 teal    the send button, and the helix
+	 *   #A76660 dust    secondary rules and icon strokes
+	 *
+	 * Cream text is only ever on maroon or forest. On cream itself the text is
+	 * forest, and nowhere else.
+	 */
+	--color-cream: #ffebcb;
+	--color-teal: #21a179;
+	--color-forest: #023436;
+	--color-dust: #a76660;
+	--color-maroon: #601700;
+
+	/*
+	 * One derived shade, and the split is measured rather than aesthetic.
+	 * Against `--color-cream`:
+	 *
+	 *   #21A179 teal   -> 2.80:1   below the 3:1 floor for a stroke
+	 *   #157F5A        -> 4.27:1   clears it, and carries white at 4.98:1
+	 *
+	 * So `teal` is a *fill* colour -- the send button, the helix -- and never a
+	 * border or a focus ring. `teal-ink` is the teal that draws a line.
+	 */
+	--color-teal-ink: #157f5a;
+	--color-muted: #6f6250; /* 5.09:1 on cream, secondary text */
+
+	/* ------------------------------------------------------- surfaces --- */
+	/*
+	 * Warm neutrals mixed from the palette rather than borrowed from a grey
+	 * scale. A neutral grey next to this cream reads as dirt; these carry the
+	 * same hue family so the whole app stays one temperature. Needed because the
+	 * brief's five colours cannot carry a hairline between two panels.
+	 */
+	--color-paper: #fffcf7; /* raised surface: cards, panels */
+	--color-shell: #fff6e6; /* one step off cream, for inset areas */
+	--color-line: #eadcc2; /* hairline */
+	--color-line-strong: #d9c6a2; /* emphasised border */
+
+	/*
+	 * The brief's sidebar rule, kept as a token so it is not retyped as an
+	 * rgba() literal at the one call site. `#A76D60` at 60% over cream composites
+	 * to `#CA9F8B`, which measures 2.04:1 -- fine for a divider between two
+	 * regions of the same surface, which is all this is.
+	 */
+	--color-rule: rgba(167, 109, 96, 0.6);
+
+	/*
+	 * Dark mode is retired. These stay because the retired `dark:` classes still
+	 * reference them and would fail to resolve if they were deleted. They cannot
+	 * be reached -- see `@custom-variant dark` above.
+	 */
+	--color-night: #02282b;
+	--color-night-raised: #07383b;
+	--color-night-line: #0d4749;
+	--color-night-muted: #a8b5ab;
+	--color-night-text: #ffe4bd;
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ------------------------------------------------------------------- base -- */
+
+@layer base {
+	/*
+	 * The reset the brief asks for, stated explicitly rather than inherited from
+	 * Tailwind's preflight. `border-box` is what makes `w-[274px]` on the
+	 * sidebar and `w-[558px]` on the composer mean what they look like they mean.
+	 */
+	*,
+	*::before,
+	*::after {
+		box-sizing: border-box;
+	}
+
+	/*
+	 * Light-only, declared to the browser rather than assumed. `color-scheme`
+	 * is what stops a dark OS from painting scrollbars, form control chrome and
+	 * the canvas under the page in dark, which no amount of `background` on
+	 * `body` will override.
+	 */
+	:root {
+		color-scheme: light;
+	}
+
+	html {
+		-webkit-text-size-adjust: 100%;
+		/*
+		 * Nothing in this app scrolls horizontally, so clipping here is a backstop
+		 * rather than a fix: `min-w-0` on the flex children is what actually
+		 * stops a long label widening the sidebar. It is on `html` and not `body`
+		 * because `overflow` on `body` would make it a scroll container and take
+		 * the page's scroll position with it.
+		 */
+		overflow-x: hidden;
+	}
+
+	/*
+	 * The whole app surface. `#023436` is the default text colour and is set
+	 * here rather than on every element, so a new component is correct by
+	 * default and only has to say otherwise when it sits on a filled surface.
+	 */
+	html,
+	body {
+		background: var(--color-cream);
+		color: var(--color-forest);
+	}
+
+	body {
+		margin: 0;
+		font-family: var(--font-sans);
+		text-rendering: optimizeLegibility;
+		-webkit-font-smoothing: antialiased;
+	}
+
+	/*
+	 * Focus ring in teal-ink. Every focusable thing on cream clears 3:1 with it,
+	 * which the brand teal does not -- see the token note above. Pointer users
+	 * never see it; keyboard users always do.
+	 */
+	:focus-visible {
+		outline: 2px solid var(--color-teal-ink);
+		outline-offset: 2px;
+	}
+
+	::selection {
+		background-color: var(--color-teal-ink);
+		color: var(--color-cream);
+	}
+
+	/* Tabular figures keep a column of numbers still as its values change. */
+	.font-mono {
+		font-variant-numeric: tabular-nums;
+	}
+}
+
+/* -------------------------------------------------------------- utilities -- */
+
+@layer utilities {
+	/*
+	 * Headings. An alias for the sans stack, kept so the call sites written when
+	 * this was a serif still say "this is display type" rather than nothing.
+	 */
+	.font-display {
+		font-family: var(--font-display);
+		letter-spacing: -0.011em;
+	}
+
+	/*
+	 * The wordmark lockup. All-caps with the tracking pushed *out*, because
+	 * Nunito is a rounded face with generous counters: at 20px the tight tracking
+	 * that suited the previous sans closed "GENE PILOT" into a single blob.
+	 */
+	.wordmark {
+		font-family: var(--font-display);
+		font-weight: 700;
+		letter-spacing: 0.14em;
+		text-transform: uppercase;
+	}
+
+	/*
+	 * Loading placeholder. A sweep rather than a pulse, because a pulse across
+	 * a wide panel reads as a flicker instead of as "still working".
+	 */
+	.skeleton {
+		position: relative;
+		overflow: hidden;
+		background-color: var(--color-line);
+	}
+
+	.skeleton::after {
+		position: absolute;
+		inset: 0;
+		transform: translateX(-100%);
+		background-image: linear-gradient(
+			90deg,
+			transparent,
+			color-mix(in oklab, var(--color-paper) 65%, transparent),
+			transparent
+		);
+		content: "";
+		animation: skeleton-sweep 1.8s linear infinite;
+	}
+
+	@keyframes skeleton-sweep {
+		100% {
+			transform: translateX(100%);
+		}
+	}
+
+	/*
+	 * A queued or processing analysis is the one place a live indicator earns
+	 * its animation: that row genuinely is changing underneath the reader.
+	 */
+	@keyframes status-pulse {
+		0%,
+		100% {
+			opacity: 1;
+		}
+		50% {
+			opacity: 0.3;
+		}
+	}
+
+	.animate-status-pulse {
+		animation: status-pulse 1.5s ease-in-out infinite;
+	}
+
+	/*
+	 * Centring that cannot push content out of reach.
+	 *
+	 * `justify-content: center` in a flex column aligns overflow to *both* edges,
+	 * so when the children are taller than the box the top of them lands above
+	 * the scrollable area and cannot be scrolled to. `safe center` keeps the
+	 * centring when there is room and falls back to `start` when there is not.
+	 *
+	 * Written as two declarations on purpose: browsers without `safe` drop the
+	 * second and keep `center`, so this is a plain centring rule that improves
+	 * where it can rather than a bet on support.
+	 */
+	.justify-center-safe {
+		justify-content: center;
+		justify-content: safe center;
+	}
+
+	/* Wide payloads scroll instead of stretching a panel past the fold. */
+	.scrollbar-slim {
+		scrollbar-width: thin;
+		scrollbar-color: var(--color-line-strong) transparent;
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	*,
+	*::before,
+	*::after {
+		animation-duration: 0.01ms !important;
+		animation-iteration-count: 1 !important;
+		transition-duration: 0.01ms !important;
+	}
 }

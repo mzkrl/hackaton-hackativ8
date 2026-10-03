@@ -55,7 +55,7 @@ export function SequenceImport({ projectId, onImported }: { projectId: string; o
 			description="Upload a research file, or register a sequence from pasted text."
 		>
 			<div className="flex flex-col gap-4">
-				<div className="flex gap-1 rounded-lg bg-zinc-100 p-1 dark:bg-zinc-800">
+				<div className="flex gap-1 rounded-lg bg-shell p-1 dark:bg-night-raised">
 					{(["file", "paste"] as const).map((value) => (
 						<button
 							key={value}
@@ -68,8 +68,8 @@ export function SequenceImport({ projectId, onImported }: { projectId: string; o
 							className={cx(
 								"flex-1 rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors",
 								tab === value
-									? "bg-white text-zinc-900 shadow-sm dark:bg-zinc-950 dark:text-zinc-50"
-									: "text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100",
+									? "bg-paper text-forest shadow-sm dark:bg-night dark:text-night-text"
+									: "text-muted hover:text-forest dark:text-night-muted dark:hover:text-night-text",
 							)}
 						>
 							{value === "file" ? "Upload file" : "Paste sequence"}
@@ -187,7 +187,7 @@ function FileImport({
 			/>
 
 			{file ? (
-				<p className="text-xs text-zinc-500">
+				<p className="text-xs text-muted">
 					{file.name} · {formatBytes(file.size)}
 					{badExtension ? " · unsupported extension" : ""}
 				</p>
@@ -240,12 +240,12 @@ function PasteImport({
 			/>
 
 			{summary ? (
-				<p className="text-xs text-zinc-500">
-					Detected <strong className="font-medium text-zinc-700 dark:text-zinc-300">{summary.format}</strong>
+				<p className="text-xs text-muted">
+					Detected <strong className="font-medium text-forest dark:text-night-muted">{summary.format}</strong>
 					{summary.recordId ? (
 						<>
 							{" · "}
-							record <strong className="font-medium text-zinc-700 dark:text-zinc-300">{summary.recordId}</strong>
+							record <strong className="font-medium text-forest dark:text-night-muted">{summary.recordId}</strong>
 						</>
 					) : null}
 					{" · "}

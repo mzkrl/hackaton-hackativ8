@@ -51,11 +51,19 @@ export function AuthView({ onAuthenticated }: { onAuthenticated: (user: User) =>
 	return (
 		<div className="mx-auto flex w-full max-w-sm flex-col gap-5 py-10">
 			<div className="text-center">
-				<h1 className="text-xl font-semibold text-zinc-900 dark:text-zinc-50">
-					Genomic Insight
+				{/*
+				 * The heading names the *task*, not the product. The shell already
+				 * carries the wordmark directly above this on every layout, so
+				 * repeating it here would be the same three words twice in one
+				 * viewport. Display type to match the home screen's voice.
+				 */}
+				<h1 className="font-display text-2xl font-semibold tracking-tight text-forest dark:text-night-text">
+					{isRegister ? "Create an account" : "Sign in"}
 				</h1>
-				<p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
-					{isRegister ? "Create an account to start a project." : "Sign in to your projects."}
+				<p className="mt-1.5 text-sm text-muted dark:text-night-muted">
+					{isRegister
+						? "An account adds cloud history and project management."
+						: "Your projects, sequences and results are waiting."}
 				</p>
 			</div>
 
@@ -99,7 +107,7 @@ export function AuthView({ onAuthenticated }: { onAuthenticated: (user: User) =>
 				</Button>
 			</form>
 
-			<p className="text-center text-xs text-zinc-500">
+			<p className="text-center text-xs text-muted">
 				{isRegister ? "Already have an account?" : "No account yet?"}{" "}
 				<button
 					type="button"
@@ -108,8 +116,8 @@ export function AuthView({ onAuthenticated }: { onAuthenticated: (user: User) =>
 						setError(null);
 					}}
 					className={cx(
-						"font-medium text-zinc-900 underline underline-offset-2",
-						"hover:text-zinc-600 dark:text-zinc-100 dark:hover:text-zinc-300",
+						"font-medium text-forest underline underline-offset-2",
+						"hover:text-muted dark:text-night-text dark:hover:text-night-text",
 					)}
 				>
 					{isRegister ? "Sign in" : "Create one"}

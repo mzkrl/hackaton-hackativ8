@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { Workspace } from "../../components/workspace";
 
 export const metadata: Metadata = {
-	// No suffix here: the layout's title template appends "· Genomic Insight".
+	// No suffix here: the layout's title template appends "· Gene Pilot".
 	title: "Workspace",
 	description: "Import sequences, queue analyses, and keep notes per project.",
 };

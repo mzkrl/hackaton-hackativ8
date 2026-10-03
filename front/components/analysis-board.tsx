@@ -78,14 +78,14 @@ function AnalysisRow({
 	};
 
 	return (
-		<li className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-800">
+		<li className="rounded-lg border border-line p-3 dark:border-night-line">
 			<div className="flex flex-wrap items-center justify-between gap-2">
 				<div className="min-w-0">
-					<p className="truncate text-sm font-medium text-zinc-900 dark:text-zinc-100">
+					<p className="truncate text-sm font-medium text-forest dark:text-night-text">
 						<span className="font-mono">{analysis.analysisType}</span>
-						<span className="font-normal text-zinc-500"> · {label}</span>
+						<span className="font-normal text-muted"> · {label}</span>
 					</p>
-					<p className="mt-0.5 text-xs text-zinc-500 dark:text-zinc-400">
+					<p className="mt-0.5 text-xs text-muted dark:text-night-muted">
 						{formatDate(analysis.createdAt)}
 						{analysis.queueJobId ? ` · job ${analysis.queueJobId.slice(0, 8)}` : ""}
 					</p>

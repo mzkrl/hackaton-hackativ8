@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { describeError, isApiConfigured, isUnauthorized } from "../lib/api";
@@ -20,11 +19,13 @@ import {
 	type User,
 } from "../lib/genomics";
 import { AnalysisBoard } from "./analysis-board";
+import { AppShell } from "./app-shell";
 import { AuthView } from "./auth-view";
+import { LogOutIcon, PlusIcon } from "./brand";
 import { NotesPanel } from "./notes-panel";
 import { SequenceBoard } from "./sequence-board";
 import { SequenceImport } from "./sequence-import";
-import { Button, Empty, Field, Notice, Panel, cx, isPending } from "./primitives";
+import { Button, Empty, Field, Notice, Panel, Skeleton, SkeletonRows, cx, isPending } from "./primitives";
 
 type Session = { state: "loading" } | { state: "anonymous" } | { state: "ready"; user: User };
 
@@ -97,18 +98,41 @@ export function Workspace() {
 		);
 	}
 
+	// The session lives in an HttpOnly cookie, so "am I signed in" can only be
+	// answered by the API from the browser. This is a real round trip on every
+	// load of /workspace, so it gets a placeholder rather than a spinner: the
+	// workspace below keeps its shape and the page does not jump once it lands.
+	//
+	// The shell is rendered in all three states so the chrome does not move when
+	// the session resolves — wordmark and sidebar in place, only the middle
+	// column swaps.
 	if (session.state === "loading") {
-		return <p className="p-6 text-sm text-zinc-500">Checking your session…</p>;
+		return (
+			<AppShell>
+				<div className="mx-auto w-full max-w-3xl p-4">
+					<Skeleton className="h-4 w-40" />
+					<div className="mt-6 flex flex-col gap-3">
+						<Skeleton className="h-24 w-full" />
+						<Skeleton className="h-24 w-full" />
+						<Skeleton className="h-24 w-full" />
+					</div>
+				</div>
+			</AppShell>
+		);
 	}
 
 	if (session.state === "anonymous") {
 		return (
-			<AuthView
-				onAuthenticated={(user) => {
-					setFatal(null);
-					setSession({ state: "ready", user });
-				}}
-			/>
+			// No `login` prop: the login form *is* the content here, so a second
+			// sign-in call above it would be a duplicate control.
+			<AppShell>
+				<AuthView
+					onAuthenticated={(user) => {
+						setFatal(null);
+						setSession({ state: "ready", user });
+					}}
+				/>
+			</AppShell>
 		);
 	}
 
@@ -312,53 +336,61 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 	};
 
 	return (
-		<div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-8">
-			<header className="flex flex-wrap items-center justify-between gap-3">
-				<div>
-					<Link
-						href="/"
-						className="text-lg font-semibold text-zinc-900 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-zinc-900 dark:text-zinc-50 dark:focus-visible:outline-zinc-100"
-					>
-						Genomic Insight
-					</Link>
-					<p className="text-xs text-zinc-500">Signed in as {user.name || user.email}</p>
-				</div>
-				<Button onClick={signOut}>Sign out</Button>
-			</header>
+		<AppShell
+			// An in-page anchor, so the sidebar action scrolls to the importer
+			// rather than reloading. `scroll-mt` on the target clears the sticky
+			// mobile bar; on desktop the sidebar is beside the scroll, not over it.
+			action={{ label: "New Analysis", href: "#new-analysis", icon: <PlusIcon className="size-4" /> }}
+			account={{
+				name: user.name || user.email,
+				detail: user.email,
+				action: { label: "Sign out", onClick: signOut, icon: <LogOutIcon className="size-3.5" /> },
+			}}
+		>
+			<div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-8">
+				{error ? <Notice tone="error">{error}</Notice> : null}
+				{queueBlock ? <Notice tone="info">{queueBlock}</Notice> : null}
 
-			{error ? <Notice tone="error">{error}</Notice> : null}
-			{queueBlock ? <Notice tone="info">{queueBlock}</Notice> : null}
+				<ProjectPicker
+					projects={projects}
+					selectedId={activeId}
+					onSelect={setSelectedId}
+					onCreated={refresh}
+				/>
 
-			<ProjectPicker
-				projects={projects}
-				selectedId={activeId}
-				onSelect={setSelectedId}
-				onCreated={refresh}
-			/>
+				{loading ? (
+					<div className="flex flex-col gap-3">
+						<Panel title="Sequences" description="Loading your sequences…">
+							<SkeletonRows rows={3} />
+						</Panel>
+						<Panel title="Analyses" description="Loading analysis history…">
+							<SkeletonRows rows={2} />
+						</Panel>
+					</div>
+				) : !project ? (
+					<Empty>Create a project to begin.</Empty>
+				) : (
+					<>
+						<div id="new-analysis" className="scroll-mt-24">
+							<SequenceImport projectId={project.id} onImported={reloadSequences} />
+						</div>
 
-			{loading ? (
-				<p className="text-sm text-zinc-500">Loading…</p>
-			) : !project ? (
-				<Empty>Create a project to begin.</Empty>
-			) : (
-				<>
-					<SequenceImport projectId={project.id} onImported={reloadSequences} />
+						<SequenceBoard
+							sequences={sequences}
+							analysesBySequence={countBySequence(analyses)}
+							canQueue={!queueBlock}
+							onQueued={onAnalysisQueued}
+							onSequencesChanged={reloadSequences}
+							onQueueBlocked={setQueueBlock}
+						/>
 
-					<SequenceBoard
-						sequences={sequences}
-						analysesBySequence={countBySequence(analyses)}
-						canQueue={!queueBlock}
-						onQueued={onAnalysisQueued}
-						onSequencesChanged={reloadSequences}
-						onQueueBlocked={setQueueBlock}
-					/>
+						<AnalysisBoard analyses={analyses} sequenceLabels={sequenceLabels} onRefresh={refresh} />
 
-					<AnalysisBoard analyses={analyses} sequenceLabels={sequenceLabels} onRefresh={refresh} />
-
-					<NotesPanel projectId={project.id} messages={messages} onChanged={reloadMessages} />
-				</>
-			)}
-		</div>
+						<NotesPanel projectId={project.id} messages={messages} onChanged={reloadMessages} />
+					</>
+				)}
+			</div>
+		</AppShell>
 	);
 }
 
@@ -417,8 +449,8 @@ function ProjectPicker({
 								className={cx(
 									"rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors",
 									item.id === selectedId
-										? "border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900"
-										: "border-zinc-300 text-zinc-700 hover:bg-zinc-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800",
+										? "border-forest bg-forest text-cream dark:border-cream dark:bg-cream dark:text-forest"
+										: "border-line-strong text-forest hover:bg-shell dark:border-night-line dark:text-night-text dark:hover:bg-night-raised",
 								)}
 							>
 								{item.name}
