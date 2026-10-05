@@ -35,18 +35,28 @@ export const users = pgTable("users", {
   updatedAt: updatedAt(),
 });
 
+export const guestSessions = pgTable("guest_sessions", {
+  id: text("id").primaryKey(),
+  createdAt: createdAt(),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+});
+
 export const projects = pgTable(
   "projects",
   {
     id: uuid("id").defaultRandom().primaryKey(),
-    userId: uuid("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    guestId: text("guest_id").references(() => guestSessions.id, {
+      onDelete: "set null",
+    }),
     name: text("name").notNull(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (table) => [index("projects_user_id_idx").on(table.userId)]
+  (table) => [
+    index("projects_user_id_idx").on(table.userId),
+    index("projects_guest_id_idx").on(table.guestId),
+  ]
 );
 
 export const sequences = pgTable(
@@ -121,6 +131,10 @@ export const reports = pgTable(
   (table) => [index("reports_project_id_idx").on(table.projectId)]
 );
 
+export const guestSessionsRelations = relations(guestSessions, ({ many }) => ({
+  projects: many(projects),
+}));
+
 export const usersRelations = relations(users, ({ many }) => ({
   projects: many(projects),
 }));
@@ -163,6 +177,8 @@ export const reportsRelations = relations(reports, ({ one }) => ({
 
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
+export type GuestSession = typeof guestSessions.$inferSelect;
+export type NewGuestSession = typeof guestSessions.$inferInsert;
 export type Project = typeof projects.$inferSelect;
 export type NewProject = typeof projects.$inferInsert;
 export type Sequence = typeof sequences.$inferSelect;

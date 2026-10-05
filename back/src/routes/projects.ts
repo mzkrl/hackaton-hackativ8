@@ -4,7 +4,8 @@ import { Elysia, t } from "elysia";
 import { getDb } from "../db/client";
 import { projects } from "../db/schema";
 import { ApiError } from "../lib/api-error";
-import { requireUserId } from "../lib/current-user";
+import { requirePrincipal } from "../lib/current-user";
+import { assertCanCreateProject } from "../lib/quota";
 
 const projectParams = t.Object({ id: t.String({ format: "uuid" }) });
 
@@ -16,7 +17,7 @@ export const projectsRoutes = new Elysia()
 	.post(
 		"/projects",
 		async ({ request, body, status }) => {
-			const userId = await requireUserId(request);
+			const principal = await requirePrincipal(request);
 			const name = body.name.trim();
 
 			if (name.length === 0) {
@@ -27,9 +28,16 @@ export const projectsRoutes = new Elysia()
 				);
 			}
 
+			await assertCanCreateProject(principal);
+
+			const values =
+				principal.kind === "guest"
+					? { guestId: principal.id, name }
+					: { userId: principal.id, name };
+
 			const [project] = await getDb()
 				.insert(projects)
-				.values({ userId, name })
+				.values(values)
 				.returning();
 
 			return status(201, { data: project });
@@ -37,11 +45,14 @@ export const projectsRoutes = new Elysia()
 		{ body: projectBody },
 	)
 	.get("/projects", async ({ request }) => {
-		const userId = await requireUserId(request);
+		const principal = await requirePrincipal(request);
+		const ownerColumn =
+			principal.kind === "guest" ? projects.guestId : projects.userId;
+
 		const data = await getDb()
 			.select()
 			.from(projects)
-			.where(eq(projects.userId, userId))
+			.where(eq(ownerColumn, principal.id))
 			.orderBy(desc(projects.createdAt));
 
 		return { data };
@@ -49,12 +60,15 @@ export const projectsRoutes = new Elysia()
 	.get(
 		"/projects/:id",
 		async ({ request, params }) => {
-			const userId = await requireUserId(request);
+			const principal = await requirePrincipal(request);
+			const ownerColumn =
+				principal.kind === "guest" ? projects.guestId : projects.userId;
+
 			const [project] = await getDb()
 				.select()
 				.from(projects)
 				.where(
-					and(eq(projects.id, params.id), eq(projects.userId, userId)),
+					and(eq(projects.id, params.id), eq(ownerColumn, principal.id)),
 				)
 				.limit(1);
 

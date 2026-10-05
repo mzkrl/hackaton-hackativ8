@@ -4,7 +4,7 @@ import { Elysia, t } from "elysia";
 import { getDb } from "../db/client";
 import { sequences } from "../db/schema";
 import { ApiError, errorBody } from "../lib/api-error";
-import { requireUserId, resolveUserId } from "../lib/current-user";
+import { requirePrincipal, resolvePrincipal } from "../lib/current-user";
 import {
 	assertProjectOwner,
 	findOwnedSequenceByObjectKey,
@@ -55,7 +55,7 @@ export const storageRoutes = new Elysia()
 		// bucket name and region are withheld from anonymous callers though —
 		// together they hand an outsider the exact layout of private
 		// infrastructure, which is reconnaissance for no useful reason.
-		const isAuthenticated = (await resolveUserId(request)) !== null;
+		const isAuthenticated = (await resolvePrincipal(request)) !== null;
 
 		try {
 			await assertBucketReachable();
@@ -75,13 +75,13 @@ export const storageRoutes = new Elysia()
 	.post(
 		"/storage/presign",
 		async ({ request, body, status }) => {
-			const userId = await requireUserId(request);
-			await assertProjectOwner(body.projectId, userId);
+			const principal = await requirePrincipal(request);
+			await assertProjectOwner(body.projectId, principal);
 
 			// Presign writes a `sequences` row before the client has uploaded
 			// anything, so this endpoint is an unbounded row writer. Capped per
-			// session-derived user id.
-			await enforce(RATE_LIMITS.storagePresign(), userId);
+			// session-derived principal id.
+			await enforce(RATE_LIMITS.storagePresign(), principal.id);
 
 			assertAllowedFilename(body.filename);
 
@@ -120,18 +120,18 @@ export const storageRoutes = new Elysia()
 	.post(
 		"/storage/upload",
 		async ({ request, status }) => {
-			const userId = await requireUserId(request);
+			const principal = await requirePrincipal(request);
 
 			// Before `request.formData()`, which buffers the whole body. The body
 			// size itself is already capped in `app.ts` on Content-Length; this
 			// stops a caller making many separate uploads.
-			await enforce(RATE_LIMITS.storageUpload(), userId);
+			await enforce(RATE_LIMITS.storageUpload(), principal.id);
 
 			const form = await request.formData();
 			const projectId = requireFormString(form, "projectId");
 			const filename = requireFormString(form, "filename");
 
-			await assertProjectOwner(projectId, userId);
+			await assertProjectOwner(projectId, principal);
 			assertAllowedFilename(filename);
 
 			const file = form.get("file");
@@ -172,9 +172,9 @@ export const storageRoutes = new Elysia()
 		},
 	)
 	.get("/storage/*", async ({ request, params }) => {
-		const userId = await requireUserId(request);
+		const principal = await requirePrincipal(request);
 		const objectKey = params["*"];
-		const sequence = await findOwnedSequenceByObjectKey(objectKey, userId);
+		const sequence = await findOwnedSequenceByObjectKey(objectKey, principal);
 		const downloadUrl = await presignGet(objectKey);
 
 		return {
@@ -187,11 +187,11 @@ export const storageRoutes = new Elysia()
 		};
 	})
 	.delete("/storage/*", async ({ request, params }) => {
-		const userId = await requireUserId(request);
-		await enforce(RATE_LIMITS.storageMutate(), userId);
+		const principal = await requirePrincipal(request);
+		await enforce(RATE_LIMITS.storageMutate(), principal.id);
 
 		const objectKey = params["*"];
-		const sequence = await findOwnedSequenceByObjectKey(objectKey, userId);
+		const sequence = await findOwnedSequenceByObjectKey(objectKey, principal);
 
 		await deleteObject(objectKey);
 		await getDb()

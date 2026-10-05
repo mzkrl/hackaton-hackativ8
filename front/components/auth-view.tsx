@@ -3,19 +3,36 @@
 import { useState } from "react";
 
 import { describeError, isUnauthorized } from "../lib/api";
-import { login, register, type User } from "../lib/genomics";
+import {
+	login,
+	register,
+	startGuest,
+	storeGuestToken,
+	type GuestSession,
+	type User,
+} from "../lib/genomics";
 import { Button, Field, Notice, cx } from "./primitives";
 
 type Mode = "login" | "register";
 
 /**
- * Sign-in and sign-up.
+ * Sign-in, sign-up, and the guest path.
  *
  * The session is an HttpOnly cookie, so there is no token in JS to read, store
  * or clear — every successful call below just hands control back to the parent,
  * which re-reads `/auth/me` as the single source of truth for "am I signed in".
+ *
+ * The one exception is a guest: the token has to be kept in localStorage so the
+ * data can be claimed if the visitor signs up later, because the cookie is
+ * replaced on registration and the old token would be lost.
  */
-export function AuthView({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
+export function AuthView({
+	onAuthenticated,
+	onGuest,
+}: {
+	onAuthenticated: (user: User) => void;
+	onGuest: (guest: GuestSession) => void;
+}) {
 	const [mode, setMode] = useState<Mode>("login");
 	const [name, setName] = useState("");
 	const [email, setEmail] = useState("");
@@ -43,6 +60,24 @@ export function AuthView({ onAuthenticated }: { onAuthenticated: (user: User) =>
 					? "Email or password is incorrect."
 					: describeError(caught),
 			);
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const continueAsGuest = async () => {
+		setError(null);
+		setBusy(true);
+
+		try {
+			const guest = await startGuest();
+			storeGuestToken(guest.id);
+			// The expiry comes from the server, so hand the whole session up
+			// rather than an empty callback. A guest dashboard that renders an
+			// empty expiry cannot tell the visitor when the work will be dropped.
+			onGuest(guest);
+		} catch (caught) {
+			setError(describeError(caught));
 		} finally {
 			setBusy(false);
 		}
@@ -122,6 +157,25 @@ export function AuthView({ onAuthenticated }: { onAuthenticated: (user: User) =>
 				>
 					{isRegister ? "Sign in" : "Create one"}
 				</button>
+			</p>
+
+			<div className="flex items-center gap-3 text-xs text-muted">
+				<span className="h-px flex-1 bg-line" />
+				or
+				<span className="h-px flex-1 bg-line" />
+			</div>
+
+			<Button
+				type="button"
+				variant="ghost"
+				disabled={busy}
+				onClick={() => void continueAsGuest()}
+				className="w-full"
+			>
+				{busy ? "Please wait…" : "Continue as guest"}
+			</Button>
+			<p className="text-center text-xs text-muted">
+				Your work is saved on this device. Sign up later to keep it.
 			</p>
 		</div>
 	);

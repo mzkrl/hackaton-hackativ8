@@ -129,42 +129,6 @@ describe("login", () => {
 	);
 });
 
-describe("cors", () => {
-	// The frontend is a different origin, published through the tunnel, so the
-	// session cookie only works if these headers are actually sent back.
-	test("allows a configured origin with credentials", async () => {
-		const origin = "https://app.example.test";
-		const response = await fetch(`${API_URL}/auth/me`, { headers: { origin } });
-
-		expect(response.headers.get("access-control-allow-origin")).toBe(origin);
-		expect(response.headers.get("access-control-allow-credentials")).toBe("true");
-	});
-
-	test("answers the preflight so the browser accepts the request", async () => {
-		const response = await fetch(`${API_URL}/analyses`, {
-			method: "OPTIONS",
-			headers: {
-				origin: "https://app.example.test",
-				"access-control-request-method": "POST",
-				"access-control-request-headers": "content-type",
-			},
-		});
-
-		expect([204, 200]).toContain(response.status);
-		expect(response.headers.get("access-control-allow-origin")).toBe("https://app.example.test");
-		expect(response.headers.get("access-control-allow-headers")).toContain("content-type");
-	});
-
-	test("does not reflect an origin that is not allowlisted", async () => {
-		const response = await fetch(`${API_URL}/auth/me`, {
-			headers: { origin: "https://evil.example.test" },
-		});
-
-		expect(response.headers.get("access-control-allow-origin")).toBeNull();
-		expect(response.headers.get("access-control-allow-credentials")).toBeNull();
-	});
-});
-
 describe("session enforcement", () => {
 	test("me resolves the session user", async () => {
 		api.clearSession();

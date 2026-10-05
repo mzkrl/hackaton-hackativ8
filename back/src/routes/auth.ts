@@ -2,9 +2,10 @@ import { eq } from "drizzle-orm";
 import { Elysia, t } from "elysia";
 
 import { getDb } from "../db/client";
-import { users } from "../db/schema";
+import { guestSessions, users } from "../db/schema";
 import { ApiError } from "../lib/api-error";
-import { requireUserId } from "../lib/current-user";
+import { newGuestToken, requirePrincipal } from "../lib/current-user";
+import { assertNotDisposableEmail } from "../lib/disposable-email";
 import {
 	dummyPasswordHash,
 	hashPassword,
@@ -19,6 +20,8 @@ import {
 	sessionCookie,
 	signSession,
 } from "../lib/session";
+
+const GUEST_SESSION_TTL_SECONDS = 60 * 60 * 24 * 7;
 
 const credentials = t.Object(
 	{
@@ -86,6 +89,8 @@ export const authRoutes = new Elysia()
 				throw new ApiError(422, "VALIDATION_ERROR", "Name cannot be blank.");
 			}
 
+			assertNotDisposableEmail(email);
+
 			const [existing] = await getDb()
 				.select({ id: users.id })
 				.from(users)
@@ -145,21 +150,53 @@ export const authRoutes = new Elysia()
 		},
 		{ body: credentials },
 	)
+	.post("/auth/guest", async ({ request, set, status }) => {
+		requireAuthConfigured();
+
+		await enforce(RATE_LIMITS.authGuest(), () => requireClientIp(request));
+
+		const id = newGuestToken();
+		const expiresAt = new Date(Date.now() + GUEST_SESSION_TTL_SECONDS * 1000);
+
+		await getDb().insert(guestSessions).values({ id, expiresAt });
+
+		set.headers["set-cookie"] = sessionCookie(id);
+		return status(201, {
+			data: { kind: "guest" as const, id, expiresAt: expiresAt.toISOString() },
+		});
+	})
 	.post("/auth/logout", async ({ set }) => {
 		set.headers["set-cookie"] = clearedSessionCookie();
 		return { data: { success: true } };
 	})
 	.get("/auth/me", async ({ request }) => {
-		const userId = await requireUserId(request);
+		const principal = await requirePrincipal(request);
+
+		if (principal.kind === "guest") {
+			const [session] = await getDb()
+				.select({ expiresAt: guestSessions.expiresAt })
+				.from(guestSessions)
+				.where(eq(guestSessions.id, principal.id))
+				.limit(1);
+
+			if (!session) {
+				throw new ApiError(401, "UNAUTHENTICATED", "Authentication required.");
+			}
+
+			return { data: { kind: "guest" as const, expiresAt: session.expiresAt.toISOString() } };
+		}
+
 		const [user] = await getDb()
 			.select()
 			.from(users)
-			.where(eq(users.id, userId))
+			.where(eq(users.id, principal.id))
 			.limit(1);
 
 		if (!user) {
 			throw new ApiError(401, "UNAUTHENTICATED", "Authentication required.");
 		}
 
-		return { data: { user: publicUser(user) } };
+		return {
+			data: { kind: "user" as const, user: publicUser(user) },
+		};
 	});

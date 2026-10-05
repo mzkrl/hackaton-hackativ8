@@ -3,15 +3,27 @@ import { and, eq } from "drizzle-orm";
 import { getDb } from "../db/client";
 import { analyses, projects, sequences } from "../db/schema";
 import { ApiError } from "./api-error";
+import type { Principal } from "./current-user";
+
+/**
+ * The column a principal is matched against.
+ *
+ * A user owns rows through `projects.user_id`; a guest owns them through
+ * `projects.guest_id`. The two are mutually exclusive by construction — a
+ * project is created by exactly one principal — so the check is a simple
+ * column pick rather than a union.
+ */
+const ownerColumn = (principal: Principal) =>
+	principal.kind === "guest" ? projects.guestId : projects.userId;
 
 export const assertProjectOwner = async (
 	projectId: string,
-	userId: string,
+	principal: Principal,
 ): Promise<void> => {
 	const [project] = await getDb()
 		.select({ id: projects.id })
 		.from(projects)
-		.where(and(eq(projects.id, projectId), eq(projects.userId, userId)))
+		.where(and(eq(projects.id, projectId), eq(ownerColumn(principal), principal.id)))
 		.limit(1);
 
 	if (!project) {
@@ -19,12 +31,12 @@ export const assertProjectOwner = async (
 	}
 };
 
-export const findOwnedSequence = async (sequenceId: string, userId: string) => {
+export const findOwnedSequence = async (sequenceId: string, principal: Principal) => {
 	const [row] = await getDb()
 		.select({ sequence: sequences })
 		.from(sequences)
 		.innerJoin(projects, eq(sequences.projectId, projects.id))
-		.where(and(eq(sequences.id, sequenceId), eq(projects.userId, userId)))
+		.where(and(eq(sequences.id, sequenceId), eq(ownerColumn(principal), principal.id)))
 		.limit(1);
 
 	if (!row) {
@@ -36,14 +48,14 @@ export const findOwnedSequence = async (sequenceId: string, userId: string) => {
 
 export const findOwnedSequenceByObjectKey = async (
 	objectKey: string,
-	userId: string,
+	principal: Principal,
 ) => {
 	const [row] = await getDb()
 		.select({ sequence: sequences })
 		.from(sequences)
 		.innerJoin(projects, eq(sequences.projectId, projects.id))
 		.where(
-			and(eq(sequences.objectKey, objectKey), eq(projects.userId, userId)),
+			and(eq(sequences.objectKey, objectKey), eq(ownerColumn(principal), principal.id)),
 		)
 		.limit(1);
 
@@ -56,14 +68,14 @@ export const findOwnedSequenceByObjectKey = async (
 
 export const findOwnedAnalysis = async (
 	analysisId: string,
-	userId: string,
+	principal: Principal,
 ) => {
 	const [row] = await getDb()
 		.select({ analysis: analyses })
 		.from(analyses)
 		.innerJoin(sequences, eq(analyses.sequenceId, sequences.id))
 		.innerJoin(projects, eq(sequences.projectId, projects.id))
-		.where(and(eq(analyses.id, analysisId), eq(projects.userId, userId)))
+		.where(and(eq(analyses.id, analysisId), eq(ownerColumn(principal), principal.id)))
 		.limit(1);
 
 	if (!row) {

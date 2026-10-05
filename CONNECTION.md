@@ -22,6 +22,8 @@ Catatan: karena frontend prod (Vercel) dan API prod (VPS) berada di domain berbe
 
 ## 3. Alur Panggilan
 
+Yang **benar-benar jalan sekarang** (backend memanggil flow, menunggu respons):
+
 ```
 backend → Main flow (webhook) → Sequence Analysis Flow → POST /analyze → Bio Service
             ↘ 2× LanguageModel (ibm/granite-4-h-small, WatsonX)
@@ -29,6 +31,27 @@ backend → Main flow (webhook) → Sequence Analysis Flow → POST /analyze →
 ```
 
 `StructuredOutput` saat ini dikonfigurasi menghasilkan `{ service, tools[], reason }`. Kelihatannya itu hasil klasifikasi request, bukan hasil analisis akhir.
+
+**Usulan baru (dari teammate, 2026-10-04) — belum dikonfirmasi:**
+
+```
+frontend → backend: POST /analyze/file (multipart FASTA)
+         → hasil Bio + prompt user digabung jadi 1 string, key "message"
+         → POST webhook Langflow
+         → (flow selesai) Langflow POST balik ke backend
+         → frontend polling GET /analyses/:id/status
+```
+
+Dua bedanya dari yang sekarang, dan keduanya besar:
+
+1. Bio Service dipanggil **dari backend kita**, bukan dari dalam flow. Node
+   `APIRequest-kwUSA` yang memanggil `/analyze` harus dilepas.
+2. Hasil **tidak lagi kembali lewat respons webhook**, tapi lewat callback dari Langflow
+   ke backend kita.
+
+`analysis_type` dan `sequence_id` tidak lagi punya tempat di body kalau semuanya
+diratakan jadi satu string `message`, padahal mapping `analysisType` → nama tool Bio
+bergantung padanya.
 
 ## 4. Masalah yang Kami Temukan
 
@@ -54,7 +77,37 @@ Satu hal yang sudah pasti dari satu-satunya cURL yang benar tersimpan di flow: w
 
 5. **Ekspektasi timeout.** Satu run melibatkan 2 panggilan LLM + Bio Service, jadi bisa memakan waktu lama. Timeout berapa yang wajar? Apakah perlu mode streaming atau async, karena POST biasa berpotensi timeout.
 
-6. **Multi-record FASTA.** Saat ini flow memakai `/analyze` yang menerima satu string sekuens. Data kami bisa berisi FASTA multi-record. Endpoint `/analyze/file` sudah tersedia di Bio Service dan mengembalikan hasil **per record** (`results[tool][recordId]`). Apakah flow perlu beralih ke `/analyze/file` supaya semua record ikut teranalisis?
+6. ~~**Multi-record FASTA.**~~ ✅ **Sudah diverifikasi langsung ke service** (2026-10-04).
+   `POST /analyze/file` → `103.89.6.149:8001/analyze/file` dengan FASTA 2 record
+   benar-benar mengembalikan `results[tool][recordId]`:
+
+   ```json
+   "results": { "calculate_gc_content": { "seq1_…": {…}, "seq2_…": {…} } }
+   ```
+
+   Bersama `file_metadata.records[]` yang berisi `{id, description, length}` per record.
+   Angkanya benar (12/24 = 50% GC), jadi bukan echo input. **Yang belum jelas:**
+   `tools` harus dikirim sebagai repeated form field atau satu nilai comma-separated —
+   JSON array di multipart belum dicoba. Apakah flow nanti akan crippled juga, atau
+   kami panggil `/analyze/file` langsung dari backend saja?
+
+7. **Correlation ID di callback.** Body `{message}` tidak punya id, jadi saat Langflow
+   POST balik, backend tidak tahu hasil itu untuk analisis yang mana. Apakah id-nya
+   dibawa di URL callback (`POST /analyses/{id}/result`) atau di body
+   (`{analysisId, message}`)? Tanpa ini tidak ada atribusi hasil yang benar.
+
+8. **Autentikasi callback.** Callback itu menulis hasil ke database kami. Tanpa
+   HMAC/shared secret, siapa pun yang tahu URL bisa menulis hasil palsu ke analisis
+   mana pun. Apakah flow bisa mengirim header signature, dan secret-nya dikirim lewat
+   env Langflow?
+
+9. **Bentuk hasil callback.** Untuk 1 file multi-record: apakah flow mengirim 1 callback
+   berisi semua record, atau 1 callback per record? Kami perlu ini untuk menentukan
+   apakah `analyses` jadi satu baris per record atau satu baris berisi hasil majemuk.
+
+10. **Ekspektasi timeout (callback).** Kalau alur jadi callback, kami tidak bisa
+    menunggu respons webhook lagi. Berapa lama flow boleh sampai mengirim callback
+    sebelum dianggap gagal? Kami butuh angka ini untuk watchdog.
 
 ## 6. Catatan Keamanan
 

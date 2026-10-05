@@ -1,9 +1,10 @@
 import { Elysia, t } from "elysia";
 
-import { getSql } from "../db/client";
+import { getDb, getSql } from "../db/client";
+import { guestSessions } from "../db/schema";
 
 import { ApiError } from "../lib/api-error";
-import { requireUserId } from "../lib/current-user";
+import { isGuestToken, requireUserId } from "../lib/current-user";
 
 const MAX_PROJECTS = 50;
 const MAX_SEQUENCES_PER_PROJECT = 200;
@@ -228,8 +229,44 @@ const importProject = async (
 	};
 };
 
-export const guestRoutes = new Elysia().post(
-	"/guest/import",
+export const guestRoutes = new Elysia()
+	.post(
+		"/guest/claim",
+		async ({ request, body, status }) => {
+			const userId = await requireUserId(request);
+			const guestId = body.guestId.trim();
+
+			// The whole shape, not just the prefix: this string is the only thing
+			// that grants ownership of the rows below, so a caller must not be able
+			// to name a session with a malformed token and get a silent no-op that
+			// looks like a successful claim.
+			if (!isGuestToken(guestId)) {
+				throw new ApiError(422, "VALIDATION_ERROR", "Invalid guest session token.");
+			}
+
+			// Idempotent: the UPDATE matches nothing on a second call (projects
+			// already moved), and the DELETE matches nothing (session already gone).
+			// The end state is identical either way, so a retry is safe.
+			await getSql().begin(async (tx) => {
+				await tx`
+					UPDATE projects
+					SET user_id = ${userId}, guest_id = NULL, updated_at = NOW()
+					WHERE guest_id = ${guestId}
+				`;
+				await tx`DELETE FROM guest_sessions WHERE id = ${guestId}`;
+			});
+
+			return status(200, { data: { claimed: true } });
+		},
+		{
+			body: t.Object(
+				{ guestId: t.String({ minLength: 1, maxLength: 128 }) },
+				{ additionalProperties: false },
+			),
+		},
+	)
+	.post(
+		"/guest/import",
 	async ({ body, request, status }) => {
 		const userId = await requireUserId(request);
 

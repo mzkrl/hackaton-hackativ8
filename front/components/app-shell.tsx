@@ -100,14 +100,22 @@ export function AppShell({
 	account,
 }: AppShellProps) {
 	return (
-		<div className="flex min-h-full min-w-0 flex-1 flex-col md:h-screen md:flex-row md:overflow-hidden">
+		<div className="flex min-h-full min-w-0 flex-1 flex-col md:h-dvh md:flex-row md:overflow-hidden">
 			{/* ----------------------------------------------------- sidebar -- */}
 			{/*
+			 * `h-dvh` rather than `h-screen` on both the row and the sidebar, and
+			 * they have to agree. `h-screen` is `100vh`, which on a mobile browser
+			 * is measured with the URL bar already retracted -- so the column is
+			 * taller than the visible area and the footer (Settings, sign-out) sits
+			 * below the fold with no way to reach it, because the root clips with
+			 * `overflow-hidden`. `dvh` tracks the real visible height instead, so the
+			 * footer stays on screen and the bar retracting changes nothing.
+			 *
 			 * `hidden md:flex` rather than a toggleable drawer. On desktop this is
 			 * always the navigation, and a sidebar that can be collapsed is one more
 			 * piece of state to get wrong for no benefit.
 			 */}
-			<aside className="hidden h-screen w-[274px] min-w-0 shrink-0 flex-col overflow-hidden border-r border-rule md:flex">
+			<aside className="hidden h-dvh w-[274px] min-w-0 shrink-0 flex-col overflow-hidden border-r border-rule md:flex">
 				{/*
 				 * 190px, as the brief specifies. It is a tall block for three small
 				 * things, and that is the point: it is the one place the app gets to
@@ -270,16 +278,24 @@ function ShellAction({
 	// A link when it navigates, a button when it acts. The distinction matters
 	// for the keyboard: `href="#id"` is focusable and announces as a link, while
 	// a button announces as an action.
+	//
+	// A disabled action with an href renders a non-navigating span, not a Link.
+	// A disabled link that still navigates is a bug: the user is told the action
+	// is unavailable, but clicking it takes them somewhere anyway.
+	if (action.disabled) {
+		return (
+			<span className={classes} aria-disabled="true">
+				{body}
+			</span>
+		);
+	}
+
 	return action.href ? (
 		<Link href={action.href} className={classes}>
 			{body}
 		</Link>
 	) : (
-		<button
-			type="button"
-			onClick={action.disabled ? undefined : action.onClick}
-			className={classes}
-		>
+		<button type="button" onClick={action.onClick} className={classes}>
 			{body}
 		</button>
 	);

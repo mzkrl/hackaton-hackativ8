@@ -66,6 +66,15 @@ export function HomeMain() {
 				value={ask}
 				onChange={setAsk}
 				label="Ask what to analyse"
+				/*
+				 * Both controls route rather than act, for the same reason the drop
+				 * zone does: there is no project here, so there is nowhere for a file
+				 * or an analysis to go. Both were previously inert -- the paperclip
+				 * had no handler at all and the form had no `onSubmit`, so the bar
+				 * looked live and did nothing on Enter or on Send.
+				 */
+				onAttach={() => router.push("/workspace")}
+				onSubmit={() => router.push("/workspace")}
 			/>
 		</div>
 	);

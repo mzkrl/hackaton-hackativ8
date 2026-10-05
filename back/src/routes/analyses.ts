@@ -5,10 +5,12 @@ import { getDb } from "../db/client";
 import { analyses } from "../db/schema";
 import { ApiError } from "../lib/api-error";
 import { assertAllowedAnalysisType } from "../lib/analysis-types";
-import { requireUserId } from "../lib/current-user";
+import { requirePrincipal } from "../lib/current-user";
 import { findOwnedAnalysis, findOwnedSequence } from "../lib/ownership";
+import { assertCanCreateAnalysis } from "../lib/quota";
 import { assertQueueConfigured, enqueueAnalysis, queueStatus } from "../lib/queue";
 import { enforce, RATE_LIMITS } from "../lib/rate-limit";
+import { readCachedStatus, writeCachedStatus } from "../lib/analysis-status-cache";
 
 const analysisParams = t.Object({ id: t.String({ format: "uuid" }) });
 
@@ -34,13 +36,14 @@ export const analysesRoutes = new Elysia()
 	.post(
 		"/analyses",
 		async ({ request, body, status }) => {
-			const userId = await requireUserId(request);
-			const sequence = await findOwnedSequence(body.sequenceId, userId);
+			const principal = await requirePrincipal(request);
+			const sequence = await findOwnedSequence(body.sequenceId, principal);
+			await assertCanCreateAnalysis(sequence.id, principal);
 
-			// Keyed on the session-derived user id, not on anything the caller
+			// Keyed on the session-derived principal id, not on anything the caller
 			// supplied. Each queued job is a row plus a Redis entry and eventually a
 			// Bio Service call, so an unbounded submit loop is what this stops.
-			await enforce(RATE_LIMITS.analysisQueue(), userId);
+			await enforce(RATE_LIMITS.analysisQueue(), principal.id);
 
 			// Checked before the row is written, so an unknown type never becomes
 			// a durable record or reaches the worker.
@@ -97,8 +100,8 @@ export const analysesRoutes = new Elysia()
 	.get(
 		"/analyses/:id",
 		async ({ request, params }) => {
-			const userId = await requireUserId(request);
-			const analysis = await findOwnedAnalysis(params.id, userId);
+			const principal = await requirePrincipal(request);
+			const analysis = await findOwnedAnalysis(params.id, principal);
 			return { data: analysis };
 		},
 		{ params: analysisParams },
@@ -119,18 +122,32 @@ export const analysesRoutes = new Elysia()
 	.get(
 		"/analyses/:id/status",
 		async ({ request, params }) => {
-			const userId = await requireUserId(request);
-			const analysis = await findOwnedAnalysis(params.id, userId);
+			const principal = await requirePrincipal(request);
 
-			return {
-				data: {
-					id: analysis.id,
-					status: analysis.status,
-					queueJobId: analysis.queueJobId,
-					errorMessage: analysis.errorMessage,
-					updatedAt: analysis.updatedAt,
-				},
+			// Charged per authenticated principal rather than per analysis id, so one
+			// runaway poller cannot exhaust a shared bucket for everyone else, and a
+			// user watching several runs gets one budget rather than one each.
+			await enforce(RATE_LIMITS.analysisStatusPoll(), principal.id);
+
+			// The cache key is scoped to `principal.id`, so a hit is only ever returned
+			// to the principal that wrote it. Ownership is not re-checked on a hit
+			// because the session that owns the key is the authorisation.
+			const cached = await readCachedStatus(principal.id, params.id);
+			if (cached) return { data: cached };
+
+			const analysis = await findOwnedAnalysis(params.id, principal);
+
+			const view = {
+				id: analysis.id,
+				status: analysis.status,
+				queueJobId: analysis.queueJobId,
+				errorMessage: analysis.errorMessage,
+				updatedAt: analysis.updatedAt,
 			};
+
+			await writeCachedStatus(principal.id, view);
+
+			return { data: view };
 		},
 		{ params: analysisParams },
 	);

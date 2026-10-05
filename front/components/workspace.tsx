@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { describeError, isApiConfigured, isUnauthorized } from "../lib/api";
 import {
+	claimGuest,
+	clearGuestToken,
 	getAnalysis,
 	getAnalysisStatus,
 	getMe,
@@ -12,8 +14,10 @@ import {
 	listSequences,
 	logout as endSession,
 	createProject,
+	readGuestToken,
 	type Analysis,
 	type Conversation,
+	type Principal,
 	type Project,
 	type Sequence,
 	type User,
@@ -21,13 +25,16 @@ import {
 import { AnalysisBoard } from "./analysis-board";
 import { AppShell } from "./app-shell";
 import { AuthView } from "./auth-view";
-import { LogOutIcon, PlusIcon } from "./brand";
+import { LogInIcon, LogOutIcon, PlusIcon } from "./brand";
 import { NotesPanel } from "./notes-panel";
 import { SequenceBoard } from "./sequence-board";
 import { SequenceImport } from "./sequence-import";
 import { Button, Empty, Field, Notice, Panel, Skeleton, SkeletonRows, cx, isPending } from "./primitives";
 
-type Session = { state: "loading" } | { state: "anonymous" } | { state: "ready"; user: User };
+type Session =
+	| { state: "loading" }
+	| { state: "anonymous" }
+	| { state: "ready"; principal: Principal };
 
 /**
  * Tracked analysis ids survive a reload, keyed by project.
@@ -77,7 +84,7 @@ export function Workspace() {
 		// the API. Both handlers below run in a promise callback, never
 		// synchronously inside the effect body.
 		getMe()
-			.then((user) => setSession({ state: "ready", user }))
+			.then((principal) => setSession({ state: "ready", principal }))
 			.catch((error) => {
 				// A rejected session is the normal signed-out path. Anything else
 				// means the API is unreachable, and hiding that behind a login
@@ -129,17 +136,37 @@ export function Workspace() {
 				<AuthView
 					onAuthenticated={(user) => {
 						setFatal(null);
-						setSession({ state: "ready", user });
+						setSession({ state: "ready", principal: { kind: "user", user } });
 					}}
+onGuest={(guest) => {
+					setFatal(null);
+					setSession({ state: "ready", principal: guest });
+				}}
 				/>
 			</AppShell>
 		);
 	}
 
-	return <Dashboard user={session.user} onSignOut={() => setSession({ state: "anonymous" })} />;
+	if (session.principal.kind === "guest") {
+		return <GuestDashboard expiresAt={session.principal.expiresAt} />;
+	}
+
+	return (
+		<Dashboard
+			user={session.principal.user}
+			onSignOut={() => setSession({ state: "anonymous" })}
+		/>
+	);
 }
 
-function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
+/**
+ * All the data a dashboard shows, however the visitor is signed in.
+ *
+ * Extracted so a guest dashboard and a user dashboard share one implementation.
+ * The two differ only in what they put at the top — a "sign up to save" banner
+ * versus an account block — and not in how they load or refresh anything.
+ */
+function useDashboardData() {
 	const [projects, setProjects] = useState<Project[]>([]);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const [sequences, setSequences] = useState<Sequence[]>([]);
@@ -158,9 +185,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 	const project = projects.find((p) => p.id === activeId) ?? null;
 
 	useEffect(() => {
-		// localStorage does not exist during SSR, so the tracked ids can only be
-		// read after mount. Deferred to a microtask to keep the state update out
-		// of the effect body, which React flags as a cascading render.
 		let cancelled = false;
 		void Promise.resolve().then(() => {
 			if (!cancelled) setTracked(readTracked());
@@ -170,11 +194,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		};
 	}, []);
 
-	/**
-	 * Re-reads every tracked job. `GET /analyses/:id/status` is the cheap
-	 * endpoint and is enough to see a job settle; only once it is terminal is
-	 * the full row fetched, because that is the one carrying `resultJson`.
-	 */
 	const refreshAnalyses = useCallback(async () => {
 		if (trackedIds.length === 0) {
 			setAnalyses([]);
@@ -190,10 +209,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 			}),
 		);
 
-		// A pending job still needs a row, otherwise the board would blink empty
-		// between polls. The status endpoint is all that exists for one, so the
-		// placeholder leaves the fields it cannot know blank rather than inventing
-		// values the server never sent.
 		const settled = rows.filter((row): row is Analysis => row !== null);
 		const pending = await Promise.all(
 			trackedIds
@@ -225,26 +240,61 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		setMessages(activeId ? await listConversations(activeId) : []);
 	}, [activeId]);
 
-	/** Manual refresh behind the buttons. Separate from the mount effects below. */
-	const refresh = useCallback(async () => {
-		try {
-			const [nextProjects, nextSequences, nextMessages] = await Promise.all([
-				listProjects(),
-				activeId ? listSequences(activeId) : Promise.resolve([]),
-				activeId ? listConversations(activeId) : Promise.resolve([]),
-			]);
-			setProjects(nextProjects);
-			setSequences(nextSequences);
-			setMessages(nextMessages);
-			await refreshAnalyses();
-			setError(null);
-		} catch (caught) {
-			setError(describeError(caught));
-		}
-	}, [activeId, refreshAnalyses]);
+	/**
+	 * Reload everything.
+	 *
+	 * Takes an optional `projectId` so a caller that already knows which project it
+	 * wants -- project creation, in practice -- can refresh against that one. The
+	 * captured `activeId` is no use there: `setSelectedId` has not been committed
+	 * by the time such a caller wants to reload, so reading `activeId` fetches the
+	 * *previous* project's sequences and notes and leaves them on screen.
+	 */
+	const refresh = useCallback(
+		async (projectId?: string) => {
+			const target = projectId ?? activeId;
+			try {
+				const [nextProjects, nextSequences, nextMessages] = await Promise.all([
+					listProjects(),
+					target ? listSequences(target) : Promise.resolve([]),
+					target ? listConversations(target) : Promise.resolve([]),
+				]);
+				setProjects(nextProjects);
+				// Pin the selection to what was actually fetched, so the boards and
+				// the highlighted row can never describe two different projects.
+				if (target) setSelectedId(target);
+				setSequences(nextSequences);
+				setMessages(nextMessages);
+				await refreshAnalyses();
+				setError(null);
+			} catch (caught) {
+				setError(describeError(caught));
+			}
+		},
+		[activeId, refreshAnalyses],
+	);
 
-	// Projects load once. `activeId` is derived rather than stored, so there is
-	// no "pick the first project" effect to cascade a second render.
+	/**
+	 * Create a project and make it the selected one.
+	 *
+	 * The order is the entire fix. Reloading first and selecting afterwards renders
+	 * the previous project's sequences, analyses and notes for a beat, which is
+	 * exactly what read as "creating a new project just points at the last one".
+	 * Refreshing *against the new id* means the boards that appear are already the
+	 * new project's, and there is no window in which the old data is on screen.
+	 *
+	 * `createProject` is allowed to throw so the caller's form can show the message
+	 * next to the input that caused it; `refresh` reports its own failures through
+	 * the banner instead.
+	 */
+	const createAndSelect = useCallback(
+		async (name: string) => {
+			const created = await createProject(name.trim());
+			await refresh(created.id);
+			return created;
+		},
+		[refresh],
+	);
+
 	useEffect(() => {
 		let cancelled = false;
 		void (async () => {
@@ -260,8 +310,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		};
 	}, []);
 
-	// Project-scoped data reloads when the selection changes. Every state update
-	// sits past an `await`, so nothing here is a synchronous set in the effect.
 	useEffect(() => {
 		let cancelled = false;
 		void (async () => {
@@ -285,8 +333,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		};
 	}, [activeId]);
 
-	// Poll only while something is actually in flight; a terminal board stops
-	// the timer so an idle tab makes no requests.
 	useEffect(() => {
 		if (analyses.length === 0 || !analyses.some((a) => isPending(a.status))) return;
 		const timer = window.setInterval(() => void refreshAnalyses(), 2000);
@@ -307,10 +353,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		[],
 	);
 
-	// The board cannot add the new id itself — tracking is per project and it
-	// does not know which project is selected — so it reports the id back here.
-	// Keyed on `activeId`, not `selectedId`: the first project is chosen by
-	// derivation, so `selectedId` is still null the first time this runs.
 	const onAnalysisQueued = useCallback(
 		async (analysisId: string) => {
 			if (activeId) track(activeId, analysisId);
@@ -327,27 +369,135 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		return labels;
 	}, [sequences]);
 
+	return {
+		projects,
+		selectedId,
+		setSelectedId,
+		sequences,
+		messages,
+		tracked,
+		analyses,
+		error,
+		loading,
+		queueBlock,
+		setQueueBlock,
+		refresh,
+		refreshAnalyses,
+		createAndSelect,
+		reloadSequences,
+		reloadMessages,
+		track,
+		onAnalysisQueued,
+		activeId,
+		project,
+		sequenceLabels,
+	};
+}
+
+type DashboardData = ReturnType<typeof useDashboardData>;
+
+function DashboardContent({
+	user,
+	onSignOut,
+	onSignUp,
+	banner,
+	...data
+}: {
+	user?: User;
+	onSignOut?: () => void;
+	onSignUp?: () => void;
+	/** Rendered inside the shell, above the notices. */
+	banner?: ReactNode;
+} & DashboardData) {
+	const {
+		projects,
+		setSelectedId,
+		sequences,
+		messages,
+		analyses,
+		error,
+		loading,
+		queueBlock,
+		setQueueBlock,
+		refresh,
+		reloadSequences,
+		reloadMessages,
+		onAnalysisQueued,
+		activeId,
+		project,
+		sequenceLabels,
+		createAndSelect,
+	} = data;
+
+	/**
+	 * Signing out has to clear the server session, not just the local state.
+	 *
+	 * Resetting state alone would leave the cookie in place, and the next
+	 * `getMe()` would hand the same account straight back — which reads as the
+	 * button not working. The local reset happens either way, so a failed request
+	 * still leaves a usable logged-out screen.
+	 */
+	/**
+	 * The sidebar gets a ref to this so the "New project" action above it can put
+	 * the caret in the field rather than being another control that scrolls to
+	 * somewhere and leaves the user to work out what to do next.
+	 */
+	const newProjectRef = useRef<HTMLInputElement>(null);
+
 	const signOut = async () => {
 		try {
 			await endSession();
 		} finally {
-			onSignOut();
+			onSignOut?.();
 		}
 	};
 
 	return (
 		<AppShell
-			// An in-page anchor, so the sidebar action scrolls to the importer
-			// rather than reloading. `scroll-mt` on the target clears the sticky
-			// mobile bar; on desktop the sidebar is beside the scroll, not over it.
-			action={{ label: "New Analysis", href: "#new-analysis", icon: <PlusIcon className="size-4" /> }}
-			account={{
-				name: user.name || user.email,
-				detail: user.email,
-				action: { label: "Sign out", onClick: signOut, icon: <LogOutIcon className="size-3.5" /> },
+			action={{
+				label: "New project",
+				onClick: () => newProjectRef.current?.focus(),
+				icon: <PlusIcon className="size-4" />,
 			}}
+			/*
+			 * The projects list. This slot used to be passed nothing at all, so the
+			 * sidebar rendered an empty scroll area between the nav and the footer --
+			 * the projects existed, they were simply never drawn anywhere in the
+			 * sidebar, which is why creating one appeared to do nothing.
+			 */
+			recent={
+				<SidebarProjects
+					projects={projects}
+					selectedId={activeId}
+					onSelect={setSelectedId}
+					onCreate={createAndSelect}
+					nameRef={newProjectRef}
+				/>
+			}
+			account={
+				user
+					? {
+							name: user.name || user.email,
+							detail: user.email,
+							action: {
+								label: "Sign out",
+								onClick: () => void signOut(),
+								icon: <LogOutIcon className="size-3.5" />,
+							},
+						}
+					: {
+							name: "Guest",
+							detail: "Work is saved on this device",
+							action: {
+								label: "Sign up to save",
+								onClick: () => onSignUp?.(),
+								icon: <LogInIcon className="size-3.5" />,
+							},
+						}
+			}
 		>
 			<div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-8">
+				{banner}
 				{error ? <Notice tone="error">{error}</Notice> : null}
 				{queueBlock ? <Notice tone="info">{queueBlock}</Notice> : null}
 
@@ -355,7 +505,7 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 					projects={projects}
 					selectedId={activeId}
 					onSelect={setSelectedId}
-					onCreated={refresh}
+					onCreate={createAndSelect}
 				/>
 
 				{loading ? (
@@ -394,6 +544,121 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 	);
 }
 
+function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
+	return <DashboardContent user={user} onSignOut={onSignOut} {...useDashboardData()} />;
+}
+
+/**
+ * The guest dashboard.
+ *
+ * Same data, same boards as a signed-in user — a guest is a real principal, not
+ * a degraded one. The difference is the banner: work created as a guest lives
+ * in a session that expires, so the one thing the UI has to make impossible to
+ * miss is that signing up is what makes it permanent.
+ */
+function GuestDashboard({ expiresAt }: { expiresAt: string }) {
+	const [showAuth, setShowAuth] = useState(false);
+	const [claiming, setClaiming] = useState(false);
+	const [claimError, setClaimError] = useState<string | null>(null);
+
+	// Unconditional and first: the sign-up form and the dashboard are two branches
+	// of the same component, so a hook called after the early return below would
+	// change hook order the moment the visitor opens the form — which React
+	// treats as a different component and unmounts the tree underneath.
+	const data = useDashboardData();
+
+	/**
+	 * Signing up replaces the session cookie, so the guest work has to be moved
+	 * across explicitly using the token kept in local storage.
+	 *
+	 * The token is only cleared once the server confirms the move. Clearing it on
+	 * failure would be the worst possible outcome: the visitor would be looking at
+	 * a signed-in account with none of their data, and the guest rows would be
+	 * unreachable forever because the one key that could claim them is gone. So a
+	 * failed claim keeps the token and offers a retry.
+	 */
+	const claimIntoAccount = async () => {
+		const guestId = readGuestToken();
+
+		if (!guestId) {
+			setShowAuth(false);
+			return;
+		}
+
+		setClaiming(true);
+		setClaimError(null);
+
+		try {
+			await claimGuest(guestId);
+			clearGuestToken();
+			// The session changed identity, so the cheapest correct way to pick up
+			// the new owner on every already-mounted board is a fresh load.
+			window.location.reload();
+		} catch (caught) {
+			setClaimError(describeError(caught));
+			setClaiming(false);
+		}
+	};
+
+	if (showAuth) {
+		return (
+			<AppShell>
+				<div className="mx-auto flex w-full max-w-md flex-col gap-4 px-4 py-8">
+					{claimError ? (
+						<Notice tone="error">
+							<p>{claimError}</p>
+							<p className="mt-2">
+								Your guest work has <strong>not</strong> been moved yet, and it is still here. Try again.
+							</p>
+							<button
+								type="button"
+								className="mt-3 underline"
+								disabled={claiming}
+								onClick={() => void claimIntoAccount()}
+							>
+								{claiming ? "Moving your work…" : "Retry"}
+							</button>
+						</Notice>
+					) : null}
+					<AuthView
+						onAuthenticated={() => void claimIntoAccount()}
+						onGuest={() => setShowAuth(false)}
+					/>
+				</div>
+			</AppShell>
+		);
+	}
+
+	return (
+		<DashboardContent
+			onSignUp={() => setShowAuth(true)}
+			banner={
+				<Notice tone="info">
+					You are working as a guest{expirySuffix(expiresAt)}. Your work is saved on this device and
+					is temporary — create an account to keep it.
+				</Notice>
+			}
+			{...data}
+		/>
+	);
+}
+
+/**
+ * "until <date>" for a guest session, omitted when the server sent no expiry.
+ *
+ * Deliberately says nothing rather than rendering a blank or an "Invalid Date":
+ * the banner's whole job is to be honest about how long the work survives.
+ */
+function expirySuffix(expiresAt: string) {
+	if (!expiresAt) return "";
+
+	const until = new Date(expiresAt);
+
+	if (Number.isNaN(until.getTime())) return "";
+
+	return ` until ${until.toLocaleDateString()}`;
+}
+
 const countBySequence = (analyses: Analysis[]) => {
 	const counts: Record<string, number> = {};
 	for (const analysis of analyses) {
@@ -402,36 +667,132 @@ const countBySequence = (analyses: Analysis[]) => {
 	return counts;
 };
 
-function ProjectPicker({
-	projects,
-	selectedId,
-	onSelect,
-	onCreated,
-}: {
-	projects: Project[];
-	selectedId: string | null;
-	onSelect: (id: string) => void;
-	onCreated: () => Promise<void>;
-}) {
+/**
+ * Shared plumbing for the two places a project can be created.
+ *
+ * Both the sidebar and the main panel submit a name and get the same
+ * `onCreate(name)` back, so there is exactly one definition of what "creating a
+ * project" does to the screen -- and it is `createAndSelect` in `useDashboardData`,
+ * which refreshes against the new id. Neither form does its own reload.
+ */
+function useProjectCreator(onCreate: (name: string) => Promise<Project>) {
 	const [name, setName] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
-	const create = async (event: React.FormEvent) => {
+	const submit = async (event: React.FormEvent) => {
 		event.preventDefault();
+		const trimmed = name.trim();
+		// Guarded here as well as on the button: Enter reaches submit directly.
+		if (trimmed.length === 0 || busy) return;
+
 		setError(null);
 		setBusy(true);
 		try {
-			const project = await createProject(name.trim());
+			await onCreate(trimmed);
 			setName("");
-			await onCreated();
-			onSelect(project.id);
 		} catch (caught) {
+			// The name is deliberately left in the field: losing it would make a
+			// failure -- a quota rejection, most likely -- cost the user their typing.
 			setError(describeError(caught));
 		} finally {
 			setBusy(false);
 		}
 	};
+
+	return { name, setName, error, busy, submit };
+}
+
+/**
+ * The sidebar's project list, plus the inline form that creates one.
+ *
+ * `aria-current="page"` on the selected row rather than a colour alone, since the
+ * selected row is the only thing telling the user which project the boards below
+ * belong to.
+ */
+function SidebarProjects({
+	projects,
+	selectedId,
+	onSelect,
+	onCreate,
+	nameRef,
+}: {
+	projects: Project[];
+	selectedId: string | null;
+	onSelect: (id: string) => void;
+	onCreate: (name: string) => Promise<Project>;
+	nameRef: React.RefObject<HTMLInputElement | null>;
+}) {
+	const { name, setName, error, busy, submit } = useProjectCreator(onCreate);
+
+	return (
+		<section className="flex flex-col gap-3">
+			<h2 className="text-[11px] font-bold uppercase tracking-wider text-muted">Projects</h2>
+
+			{projects.length === 0 ? (
+				<p className="text-[12px] leading-relaxed text-muted">
+					No projects yet. Name one below to get started.
+				</p>
+			) : (
+				<ul className="flex flex-col gap-1">
+					{projects.map((item) => {
+						const current = item.id === selectedId;
+						return (
+							<li key={item.id}>
+								<button
+									type="button"
+									onClick={() => onSelect(item.id)}
+									aria-current={current ? "page" : undefined}
+									className={cx(
+										"flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors",
+										current
+											? "bg-forest/10 font-semibold text-forest"
+											: "text-muted hover:bg-forest/5 hover:text-forest",
+									)}
+								>
+									<span className="min-w-0 truncate">{item.name}</span>
+								</button>
+							</li>
+						);
+					})}
+				</ul>
+			)}
+
+			<form onSubmit={submit} className="flex min-w-0 flex-col gap-2">
+				<label className="text-[12px] font-semibold text-forest" htmlFor="sidebar-new-project">
+					New project
+				</label>
+				<input
+					id="sidebar-new-project"
+					ref={nameRef}
+					value={name}
+					onChange={(event) => setName(event.target.value)}
+					placeholder="Mito study"
+					disabled={busy}
+					maxLength={120}
+					className="min-w-0 rounded-lg border border-line-strong bg-paper px-2 py-1.5 text-[13px] text-forest outline-none placeholder:text-muted focus:border-teal-ink disabled:opacity-60"
+				/>
+				<Button type="submit" variant="primary" disabled={busy || name.trim().length === 0}>
+					{busy ? "Creating…" : "Create project"}
+				</Button>
+				{error ? <Notice tone="error">{error}</Notice> : null}
+			</form>
+		</section>
+	);
+}
+
+function ProjectPicker({
+	projects,
+	selectedId,
+	onSelect,
+	onCreate,
+}: {
+	projects: Project[];
+	selectedId: string | null;
+	onSelect: (id: string) => void;
+	onCreate: (name: string) => Promise<Project>;
+}) {
+	const { name, setName, error, busy, submit } = useProjectCreator(onCreate);
 
 	return (
 		<Panel title="Projects">
@@ -459,7 +820,7 @@ function ProjectPicker({
 					</div>
 				)}
 
-				<form onSubmit={create} className="flex flex-wrap items-end gap-2">
+				<form onSubmit={submit} className="flex flex-wrap items-end gap-2">
 					<div className="min-w-48 flex-1">
 						<Field
 							label="New project"
