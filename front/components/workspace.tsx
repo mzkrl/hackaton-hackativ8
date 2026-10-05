@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { describeError, isApiConfigured, isUnauthorized } from "../lib/api";
 import {
+	claimGuest,
+	clearGuestToken,
 	getAnalysis,
 	getAnalysisStatus,
 	getMe,
@@ -12,8 +14,10 @@ import {
 	listSequences,
 	logout as endSession,
 	createProject,
+	readGuestToken,
 	type Analysis,
 	type Conversation,
+	type Principal,
 	type Project,
 	type Sequence,
 	type User,
@@ -21,13 +25,16 @@ import {
 import { AnalysisBoard } from "./analysis-board";
 import { AppShell } from "./app-shell";
 import { AuthView } from "./auth-view";
-import { LogOutIcon, PlusIcon } from "./brand";
+import { LogInIcon, LogOutIcon, PlusIcon } from "./brand";
 import { NotesPanel } from "./notes-panel";
 import { SequenceBoard } from "./sequence-board";
 import { SequenceImport } from "./sequence-import";
 import { Button, Empty, Field, Notice, Panel, Skeleton, SkeletonRows, cx, isPending } from "./primitives";
 
-type Session = { state: "loading" } | { state: "anonymous" } | { state: "ready"; user: User };
+type Session =
+	| { state: "loading" }
+	| { state: "anonymous" }
+	| { state: "ready"; principal: Principal };
 
 /**
  * Tracked analysis ids survive a reload, keyed by project.
@@ -77,7 +84,7 @@ export function Workspace() {
 		// the API. Both handlers below run in a promise callback, never
 		// synchronously inside the effect body.
 		getMe()
-			.then((user) => setSession({ state: "ready", user }))
+			.then((principal) => setSession({ state: "ready", principal }))
 			.catch((error) => {
 				// A rejected session is the normal signed-out path. Anything else
 				// means the API is unreachable, and hiding that behind a login
@@ -129,17 +136,37 @@ export function Workspace() {
 				<AuthView
 					onAuthenticated={(user) => {
 						setFatal(null);
-						setSession({ state: "ready", user });
+						setSession({ state: "ready", principal: { kind: "user", user } });
 					}}
+onGuest={(guest) => {
+					setFatal(null);
+					setSession({ state: "ready", principal: guest });
+				}}
 				/>
 			</AppShell>
 		);
 	}
 
-	return <Dashboard user={session.user} onSignOut={() => setSession({ state: "anonymous" })} />;
+	if (session.principal.kind === "guest") {
+		return <GuestDashboard expiresAt={session.principal.expiresAt} />;
+	}
+
+	return (
+		<Dashboard
+			user={session.principal.user}
+			onSignOut={() => setSession({ state: "anonymous" })}
+		/>
+	);
 }
 
-function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
+/**
+ * All the data a dashboard shows, however the visitor is signed in.
+ *
+ * Extracted so a guest dashboard and a user dashboard share one implementation.
+ * The two differ only in what they put at the top — a "sign up to save" banner
+ * versus an account block — and not in how they load or refresh anything.
+ */
+function useDashboardData() {
 	const [projects, setProjects] = useState<Project[]>([]);
 	const [selectedId, setSelectedId] = useState<string | null>(null);
 	const [sequences, setSequences] = useState<Sequence[]>([]);
@@ -158,9 +185,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 	const project = projects.find((p) => p.id === activeId) ?? null;
 
 	useEffect(() => {
-		// localStorage does not exist during SSR, so the tracked ids can only be
-		// read after mount. Deferred to a microtask to keep the state update out
-		// of the effect body, which React flags as a cascading render.
 		let cancelled = false;
 		void Promise.resolve().then(() => {
 			if (!cancelled) setTracked(readTracked());
@@ -170,11 +194,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		};
 	}, []);
 
-	/**
-	 * Re-reads every tracked job. `GET /analyses/:id/status` is the cheap
-	 * endpoint and is enough to see a job settle; only once it is terminal is
-	 * the full row fetched, because that is the one carrying `resultJson`.
-	 */
 	const refreshAnalyses = useCallback(async () => {
 		if (trackedIds.length === 0) {
 			setAnalyses([]);
@@ -190,10 +209,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 			}),
 		);
 
-		// A pending job still needs a row, otherwise the board would blink empty
-		// between polls. The status endpoint is all that exists for one, so the
-		// placeholder leaves the fields it cannot know blank rather than inventing
-		// values the server never sent.
 		const settled = rows.filter((row): row is Analysis => row !== null);
 		const pending = await Promise.all(
 			trackedIds
@@ -225,7 +240,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		setMessages(activeId ? await listConversations(activeId) : []);
 	}, [activeId]);
 
-	/** Manual refresh behind the buttons. Separate from the mount effects below. */
 	const refresh = useCallback(async () => {
 		try {
 			const [nextProjects, nextSequences, nextMessages] = await Promise.all([
@@ -243,8 +257,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		}
 	}, [activeId, refreshAnalyses]);
 
-	// Projects load once. `activeId` is derived rather than stored, so there is
-	// no "pick the first project" effect to cascade a second render.
 	useEffect(() => {
 		let cancelled = false;
 		void (async () => {
@@ -260,8 +272,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		};
 	}, []);
 
-	// Project-scoped data reloads when the selection changes. Every state update
-	// sits past an `await`, so nothing here is a synchronous set in the effect.
 	useEffect(() => {
 		let cancelled = false;
 		void (async () => {
@@ -285,8 +295,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		};
 	}, [activeId]);
 
-	// Poll only while something is actually in flight; a terminal board stops
-	// the timer so an idle tab makes no requests.
 	useEffect(() => {
 		if (analyses.length === 0 || !analyses.some((a) => isPending(a.status))) return;
 		const timer = window.setInterval(() => void refreshAnalyses(), 2000);
@@ -307,10 +315,6 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		[],
 	);
 
-	// The board cannot add the new id itself — tracking is per project and it
-	// does not know which project is selected — so it reports the id back here.
-	// Keyed on `activeId`, not `selectedId`: the first project is chosen by
-	// derivation, so `selectedId` is still null the first time this runs.
 	const onAnalysisQueued = useCallback(
 		async (analysisId: string) => {
 			if (activeId) track(activeId, analysisId);
@@ -327,27 +331,107 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 		return labels;
 	}, [sequences]);
 
+	return {
+		projects,
+		selectedId,
+		setSelectedId,
+		sequences,
+		messages,
+		tracked,
+		analyses,
+		error,
+		loading,
+		queueBlock,
+		setQueueBlock,
+		refresh,
+		refreshAnalyses,
+		reloadSequences,
+		reloadMessages,
+		track,
+		onAnalysisQueued,
+		activeId,
+		project,
+		sequenceLabels,
+	};
+}
+
+type DashboardData = ReturnType<typeof useDashboardData>;
+
+function DashboardContent({
+	user,
+	onSignOut,
+	onSignUp,
+	banner,
+	...data
+}: {
+	user?: User;
+	onSignOut?: () => void;
+	onSignUp?: () => void;
+	/** Rendered inside the shell, above the notices. */
+	banner?: ReactNode;
+} & DashboardData) {
+	const {
+		projects,
+		setSelectedId,
+		sequences,
+		messages,
+		analyses,
+		error,
+		loading,
+		queueBlock,
+		setQueueBlock,
+		refresh,
+		reloadSequences,
+		reloadMessages,
+		onAnalysisQueued,
+		activeId,
+		project,
+		sequenceLabels,
+	} = data;
+
+	/**
+	 * Signing out has to clear the server session, not just the local state.
+	 *
+	 * Resetting state alone would leave the cookie in place, and the next
+	 * `getMe()` would hand the same account straight back — which reads as the
+	 * button not working. The local reset happens either way, so a failed request
+	 * still leaves a usable logged-out screen.
+	 */
 	const signOut = async () => {
 		try {
 			await endSession();
 		} finally {
-			onSignOut();
+			onSignOut?.();
 		}
 	};
 
 	return (
 		<AppShell
-			// An in-page anchor, so the sidebar action scrolls to the importer
-			// rather than reloading. `scroll-mt` on the target clears the sticky
-			// mobile bar; on desktop the sidebar is beside the scroll, not over it.
 			action={{ label: "New Analysis", href: "#new-analysis", icon: <PlusIcon className="size-4" /> }}
-			account={{
-				name: user.name || user.email,
-				detail: user.email,
-				action: { label: "Sign out", onClick: signOut, icon: <LogOutIcon className="size-3.5" /> },
-			}}
+			account={
+				user
+					? {
+							name: user.name || user.email,
+							detail: user.email,
+							action: {
+								label: "Sign out",
+								onClick: () => void signOut(),
+								icon: <LogOutIcon className="size-3.5" />,
+							},
+						}
+					: {
+							name: "Guest",
+							detail: "Work is saved on this device",
+							action: {
+								label: "Sign up to save",
+								onClick: () => onSignUp?.(),
+								icon: <LogInIcon className="size-3.5" />,
+							},
+						}
+			}
 		>
 			<div className="mx-auto flex w-full max-w-5xl flex-col gap-5 px-4 py-8">
+				{banner}
 				{error ? <Notice tone="error">{error}</Notice> : null}
 				{queueBlock ? <Notice tone="info">{queueBlock}</Notice> : null}
 
@@ -392,6 +476,121 @@ function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
 			</div>
 		</AppShell>
 	);
+}
+
+function Dashboard({ user, onSignOut }: { user: User; onSignOut: () => void }) {
+	return <DashboardContent user={user} onSignOut={onSignOut} {...useDashboardData()} />;
+}
+
+/**
+ * The guest dashboard.
+ *
+ * Same data, same boards as a signed-in user — a guest is a real principal, not
+ * a degraded one. The difference is the banner: work created as a guest lives
+ * in a session that expires, so the one thing the UI has to make impossible to
+ * miss is that signing up is what makes it permanent.
+ */
+function GuestDashboard({ expiresAt }: { expiresAt: string }) {
+	const [showAuth, setShowAuth] = useState(false);
+	const [claiming, setClaiming] = useState(false);
+	const [claimError, setClaimError] = useState<string | null>(null);
+
+	// Unconditional and first: the sign-up form and the dashboard are two branches
+	// of the same component, so a hook called after the early return below would
+	// change hook order the moment the visitor opens the form — which React
+	// treats as a different component and unmounts the tree underneath.
+	const data = useDashboardData();
+
+	/**
+	 * Signing up replaces the session cookie, so the guest work has to be moved
+	 * across explicitly using the token kept in local storage.
+	 *
+	 * The token is only cleared once the server confirms the move. Clearing it on
+	 * failure would be the worst possible outcome: the visitor would be looking at
+	 * a signed-in account with none of their data, and the guest rows would be
+	 * unreachable forever because the one key that could claim them is gone. So a
+	 * failed claim keeps the token and offers a retry.
+	 */
+	const claimIntoAccount = async () => {
+		const guestId = readGuestToken();
+
+		if (!guestId) {
+			setShowAuth(false);
+			return;
+		}
+
+		setClaiming(true);
+		setClaimError(null);
+
+		try {
+			await claimGuest(guestId);
+			clearGuestToken();
+			// The session changed identity, so the cheapest correct way to pick up
+			// the new owner on every already-mounted board is a fresh load.
+			window.location.reload();
+		} catch (caught) {
+			setClaimError(describeError(caught));
+			setClaiming(false);
+		}
+	};
+
+	if (showAuth) {
+		return (
+			<AppShell>
+				<div className="mx-auto flex w-full max-w-md flex-col gap-4 px-4 py-8">
+					{claimError ? (
+						<Notice tone="error">
+							<p>{claimError}</p>
+							<p className="mt-2">
+								Your guest work has <strong>not</strong> been moved yet, and it is still here. Try again.
+							</p>
+							<button
+								type="button"
+								className="mt-3 underline"
+								disabled={claiming}
+								onClick={() => void claimIntoAccount()}
+							>
+								{claiming ? "Moving your work…" : "Retry"}
+							</button>
+						</Notice>
+					) : null}
+					<AuthView
+						onAuthenticated={() => void claimIntoAccount()}
+						onGuest={() => setShowAuth(false)}
+					/>
+				</div>
+			</AppShell>
+		);
+	}
+
+	return (
+		<DashboardContent
+			onSignUp={() => setShowAuth(true)}
+			banner={
+				<Notice tone="info">
+					You are working as a guest{expirySuffix(expiresAt)}. Your work is saved on this device and
+					is temporary — create an account to keep it.
+				</Notice>
+			}
+			{...data}
+		/>
+	);
+}
+
+/**
+ * "until <date>" for a guest session, omitted when the server sent no expiry.
+ *
+ * Deliberately says nothing rather than rendering a blank or an "Invalid Date":
+ * the banner's whole job is to be honest about how long the work survives.
+ */
+function expirySuffix(expiresAt: string) {
+	if (!expiresAt) return "";
+
+	const until = new Date(expiresAt);
+
+	if (Number.isNaN(until.getTime())) return "";
+
+	return ` until ${until.toLocaleDateString()}`;
 }
 
 const countBySequence = (analyses: Analysis[]) => {

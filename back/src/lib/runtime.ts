@@ -22,8 +22,24 @@ export const isHostedRuntime = () =>
 /**
  * Guest/local convenience identity. Never enable this on a public deployment:
  * it hands every caller the same account.
+ *
+ * Both conditions must hold, and that conjunction is the whole point:
+ *
+ *   - `ALLOW_DEV_AUTH` must be explicitly set, and
+ *   - the runtime must not be the hosted VPS.
+ *
+ * This was previously `!isHostedRuntime() || flag(ALLOW_DEV_AUTH)`, which is an
+ * OR, so on any non-hosted runtime the left side was already true and the flag
+ * could only ever *add* the shared identity -- never remove it. The practical
+ * effect was that `ALLOW_DEV_AUTH` unset meant dev auth ON for every developer
+ * machine, and any integration test asserting that an anonymous request gets a
+ * 401 was asserting something the server could not do.
+ *
+ * The order of the terms matters for the same reason: a hosted runtime must not
+ * be talked out of it by the flag, so the AND cannot be short-circuited into an
+ * OR by a well-meaning refactor.
  */
 export const isDevIdentityAllowed = () =>
-	!isHostedRuntime() || flag(process.env.ALLOW_DEV_AUTH);
+	flag(process.env.ALLOW_DEV_AUTH) && !isHostedRuntime();
 
 export const useSecureCookies = () => isHostedRuntime();

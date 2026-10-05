@@ -9,8 +9,11 @@ graphify-out
 
 node_modules
 
+#why? this worked by multiple people, so it wont clash with the .md files that are already in the repo. the only truly useful .md are in the folder of each service.
+#DONT you dare to disobey this, im in control.
 *.md
 !CONNECTION.md
+
 
 # Compiled output sitting next to the sources shadows the .ts files at runtime.
 # These are build artefacts; the TypeScript originals are the source of truth.
@@ -19,6 +22,10 @@ back/drizzle.config.js
 
 # pm2 writes process logs here
 back/logs/
+
+# Database snapshots from scripts/db-backup.ts. These are full row dumps and
+# contain real user emails, so they must never be committed.
+back/backups/
 
 # Vendored agent tooling, not project source
 back/.agents/

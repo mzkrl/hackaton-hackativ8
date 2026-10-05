@@ -260,6 +260,20 @@ export const RATE_LIMITS = {
 		limit: limitFromEnv("RATE_LIMIT_AUTH_REGISTER", 5),
 		windowSeconds: num(process.env.RATE_LIMIT_AUTH_REGISTER_WINDOW_SECONDS, 60 * 60),
 	}),
+
+	/**
+	 * Guest session creation.
+	 *
+	 * Keyed on client address, not on a principal: there is no principal yet.
+	 * The limit is tight because a guest session is free to create and each one
+	 * is a row in the database plus a cookie; an unbounded endpoint here is a
+	 * way to fill both.
+	 */
+	authGuest: (): RateLimitRule => ({
+		scope: "auth.guest",
+		limit: limitFromEnv("RATE_LIMIT_AUTH_GUEST", 10),
+		windowSeconds: num(process.env.RATE_LIMIT_AUTH_GUEST_WINDOW_SECONDS, 60 * 60),
+	}),
 	analysisQueue: (): RateLimitRule => ({
 		scope: "analysis.queue",
 		limit: limitFromEnv("RATE_LIMIT_ANALYSIS_QUEUE", 30),
@@ -279,5 +293,28 @@ export const RATE_LIMITS = {
 		scope: "storage.mutate",
 		limit: limitFromEnv("RATE_LIMIT_STORAGE_MUTATE", 60),
 		windowSeconds: num(process.env.RATE_LIMIT_STORAGE_MUTATE_WINDOW_SECONDS, 60 * 60),
+	}),
+
+	/**
+	 * Budget for `GET /analyses/:id/status`, which the frontend calls on a timer.
+	 *
+	 * Generous on purpose, and windowed per minute rather than per hour. A run can
+	 * take up to `LANGFLOW_TIMEOUT_MS`, and a 2-second poll is 30 requests a minute
+	 * per analysis; a dashboard watching a handful of runs multiplies that. A
+	 * tighter limit would throttle a legitimate dashboard rather than an attacker,
+	 * and the symptom would be a stuck-looking UI instead of a logged error.
+	 *
+	 * A minute window also fits the abuse signal. Polling floods arrive in bursts,
+	 * and an hourly window cannot express that -- it would let a burst spend the
+	 * whole budget in seconds and then lock a real user out for the rest of the hour.
+	 *
+	 * The real defence against a polling flood is the short-TTL Redis cache in
+	 * `analysis-status-cache.ts`, which answers repeats without touching Postgres.
+	 * This limit is the backstop for a client hammering past what the cache absorbs.
+	 */
+	analysisStatusPoll: (): RateLimitRule => ({
+		scope: "analysis.status",
+		limit: limitFromEnv("RATE_LIMIT_ANALYSIS_STATUS_POLL", 240),
+		windowSeconds: num(process.env.RATE_LIMIT_ANALYSIS_STATUS_POLL_WINDOW_SECONDS, 60),
 	}),
 } satisfies Record<string, () => RateLimitRule>;

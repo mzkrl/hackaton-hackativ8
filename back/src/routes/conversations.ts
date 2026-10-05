@@ -3,7 +3,7 @@ import { Elysia, t } from "elysia";
 
 import { getDb } from "../db/client";
 import { conversations } from "../db/schema";
-import { requireUserId } from "../lib/current-user";
+import { requirePrincipal } from "../lib/current-user";
 import { assertProjectOwner } from "../lib/ownership";
 
 const conversationParams = t.Object({ projectId: t.String({ format: "uuid" }) });
@@ -18,8 +18,8 @@ export const conversationsRoutes = new Elysia()
 	.get(
 		"/conversations/:projectId",
 		async ({ request, params }) => {
-			const userId = await requireUserId(request);
-			await assertProjectOwner(params.projectId, userId);
+			const principal = await requirePrincipal(request);
+			await assertProjectOwner(params.projectId, principal);
 
 			const data = await getDb()
 				.select()
@@ -34,8 +34,8 @@ export const conversationsRoutes = new Elysia()
 	.post(
 		"/conversations",
 		async ({ request, body, status }) => {
-			const userId = await requireUserId(request);
-			await assertProjectOwner(body.projectId, userId);
+			const principal = await requirePrincipal(request);
+			await assertProjectOwner(body.projectId, principal);
 
 			const [conversation] = await getDb()
 				.insert(conversations)

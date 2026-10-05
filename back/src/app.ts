@@ -7,7 +7,7 @@ import {
 	checkAnalysisDependencies,
 	dependenciesReady,
 } from "./lib/analysis-dependencies";
-import { requireUserId, warnDevIdentityAtStartup } from "./lib/current-user";
+import { requirePrincipal, warnDevIdentityAtStartup } from "./lib/current-user";
 import { MAX_BACKEND_UPLOAD_BYTES } from "./lib/storage";
 import { analysesRoutes } from "./routes/analyses";
 import { authRoutes } from "./routes/auth";
@@ -200,7 +200,7 @@ export const createApp = () => {
 		 * outside this process, so nothing else in the app would reveal them.
 		 */
 		.get("/health/dependencies", async ({ request }) => {
-			await requireUserId(request);
+			await requirePrincipal(request);
 
 			const dependencies = await checkAnalysisDependencies();
 			const ready = dependenciesReady(dependencies);

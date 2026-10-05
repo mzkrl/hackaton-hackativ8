@@ -10,9 +10,13 @@ import {
 	ANALYSIS_QUEUE,
 	type AnalysisJob,
 	enqueueAnalysis,
+	scheduleRecheck,
 	workerConnection,
 	workerConcurrency,
+	workerJobTimeoutMs,
+	workerMaxRechecks,
 } from "../lib/queue";
+import { isTimeout, withTimeout } from "../lib/timeout";
 
 const markProcessing = (analysisId: string) =>
 	getDb()
@@ -46,14 +50,53 @@ if (enqueuePort && !enqueueSecret) {
 const worker = new Worker<AnalysisJob>(
 	ANALYSIS_QUEUE,
 	async (job) => {
-		const { analysisId } = job.data;
+		const { analysisId, recheckCount = 0 } = job.data;
+
+		// A re-check does not run the analysis. It looks at the row and decides
+		// what, if anything, is left to do.
+		if (recheckCount > 0) {
+			const analysis = await getDb()
+				.select()
+				.from(analyses)
+				.where(eq(analyses.id, analysisId))
+				.limit(1);
+
+			if (analysis.length === 0) {
+				throw new Error(`Analysis ${analysisId} not found.`);
+			}
+
+			const status = analysis[0].status;
+
+			if (status === "completed" || status === "failed") {
+				return;
+			}
+
+			if (status === "processing") {
+				if (recheckCount < workerMaxRechecks()) {
+					await scheduleRecheck(job.data, recheckCount + 1);
+				} else {
+					await markFailed(analysisId, "Analysis timed out after maximum re-checks.");
+				}
+				return;
+			}
+
+			// Status is "pending": the run never started. Fall through and run it.
+		}
+
 		await markProcessing(analysisId);
 
 		try {
-			const result = await runAnalysis(job.data);
+			const result = await withTimeout(runAnalysis(job.data), workerJobTimeoutMs());
 			await markCompleted(analysisId, result);
 			return result;
 		} catch (error) {
+			if (isTimeout(error)) {
+				// The run may still land. Release the slot and let a delayed job
+				// pick up the result.
+				await scheduleRecheck(job.data, 1);
+				return;
+			}
+
 			const message =
 				error instanceof Error ? error.message : "Analysis failed for an unknown reason.";
 			await markFailed(analysisId, message);

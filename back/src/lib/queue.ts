@@ -9,6 +9,14 @@ export type AnalysisJob = {
 	sequenceId: string;
 	projectId: string;
 	analysisType: string;
+	/**
+	 * 0 (or absent) means "run the analysis". A positive value means "this is a
+	 * re-check: look at the analysis row and decide what, if anything, is left
+	 * to do", and counts how many re-checks have already been scheduled.
+	 *
+	 * The count is what stops a run that never lands from polling forever.
+	 */
+	recheckCount?: number;
 };
 
 const DEFAULT_ATTEMPTS = 3;
@@ -57,6 +65,44 @@ export const workerConnection = (): ConnectionOptions => {
 export const workerConcurrency = () => {
 	const parsed = Number(process.env.WORKER_CONCURRENCY?.trim() || 2);
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : 2;
+};
+
+/**
+ * How long a single run may hold a worker slot before the worker gives up
+ * waiting and hands the rest of the wait to a delayed re-check job.
+ *
+ * The default is deliberately short. A worker slot is the scarce resource: with
+ * concurrency 2, one run that sits for ten minutes blocks a quarter of the
+ * queue for that whole time. Releasing the slot after 30s and polling from a
+ * delayed job costs one extra Redis round trip per interval and keeps the slot
+ * free for work that can actually finish.
+ */
+export const workerJobTimeoutMs = () => {
+	const parsed = Number(process.env.WORKER_JOB_TIMEOUT_MS?.trim() || 30_000);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : 30_000;
+};
+
+/**
+ * Delay between re-check jobs. Long enough that a run which is merely slow has
+ * a chance to land before the next poll, short enough that a user watching the
+ * board is not left staring at "processing" for long.
+ */
+export const workerRecheckDelayMs = () => {
+	const parsed = Number(process.env.WORKER_RECHECK_DELAY_MS?.trim() || 30_000);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : 30_000;
+};
+
+/**
+ * Upper bound on re-checks, so a run that never lands cannot poll forever.
+ *
+ * The bound is on *re-checks*, not on total elapsed time: a run that times out
+ * and is re-checked ten times at 30s intervals has been running for roughly
+ * five minutes before it is failed, which is longer than any executor call
+ * should legitimately take.
+ */
+export const workerMaxRechecks = () => {
+	const parsed = Number(process.env.WORKER_MAX_RECHECKS?.trim() || 10);
+	return Number.isInteger(parsed) && parsed > 0 ? parsed : 10;
 };
 
 const queueAttempts = () => {
@@ -245,4 +291,31 @@ export const enqueueAnalysis = async (job: AnalysisJob) => {
 		await discardProducerQueue();
 		throw error;
 	}
+};
+
+/**
+ * Schedules a delayed re-check for a run that outlived its worker slot.
+ *
+ * The job id is derived from the analysis id and the re-check count so that
+ * every re-check is a distinct job: BullMQ dedupes on `jobId`, and reusing the
+ * analysis id would make the second re-check silently replace the first.
+ *
+ * The re-check is a *new* job rather than a retry of the original. The original
+ * job is finished from BullMQ's point of view -- its handler returned, so its
+ * lock is released and the slot is free -- while the run it started is still in
+ * flight. The re-check's only job is to look at the row and decide what, if
+ * anything, remains.
+ */
+export const scheduleRecheck = async (job: AnalysisJob, recheckCount: number) => {
+	const queue = await getProducerQueue();
+
+	await queue.add(
+		ANALYSIS_QUEUE,
+		{ ...job, recheckCount },
+		{
+			...jobOptions(),
+			jobId: `${job.analysisId}:recheck:${recheckCount}`,
+			delay: workerRecheckDelayMs(),
+		},
+	);
 };

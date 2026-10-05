@@ -60,11 +60,24 @@ export const createClient = () => {
 			auth,
 		});
 
+	const get = (path: string, auth = true) => request(path, { auth });
+
 	const post = (path: string, payload: unknown, auth = true) => json("POST", path, payload, auth);
 
 	const createUser = async (label = "user") => {
 		const email = `${label}-${crypto.randomUUID().slice(0, 8)}@vps.test`;
 		const result = await post("/auth/register", { email, password: PASSWORD, name: `${label} probe` }, false);
+
+		if (result.status === 429) {
+			// `auth.register` is budgeted per client address, and a full suite run
+			// creates far more accounts than that budget allows from one address.
+			// The limiter is working; the suite needs the API under test started
+			// with RATE_LIMIT_AUTH_REGISTER=0.
+			throw new Error(
+				"POST /auth/register returned 429 — the API under test is enforcing the real " +
+					"auth.register budget. Restart it with RATE_LIMIT_AUTH_REGISTER=0 to run this suite.",
+			);
+		}
 
 		if (result.status !== 201) {
 			throw new Error(`register failed: ${result.status} ${JSON.stringify(result.body)}`);
@@ -92,6 +105,29 @@ export const createClient = () => {
 			...overrides,
 		});
 
+	const createGuest = async () => {
+		const result = await post("/auth/guest", {}, false);
+
+		if (result.status === 429) {
+			// Almost always the real limiter doing its job, not a broken server.
+			// `auth.guest` is budgeted per client address, and an integration run
+			// creates enough sessions from one address to exhaust a shared
+			// hour-long window, so the suite needs the API under test started with
+			// RATE_LIMIT_AUTH_GUEST=0. Said here because the raw 429 otherwise
+			// surfaces as an opaque throw from inside this helper.
+			throw new Error(
+				"POST /auth/guest returned 429 — the API under test is enforcing the real " +
+					"auth.guest budget. Restart it with RATE_LIMIT_AUTH_GUEST=0 to run this suite.",
+			);
+		}
+
+		if (result.status !== 201) {
+			throw new Error(`guest failed: ${result.status} ${JSON.stringify(result.body)}`);
+		}
+
+		return result.body.data as { kind: string; id: string; expiresAt: string };
+	};
+
 	const upload = async (projectId: string, filename: string, body: string) => {
 		const form = new FormData();
 
@@ -104,9 +140,11 @@ export const createClient = () => {
 
 	return {
 		request,
+		get,
 		post,
 		json,
 		createUser,
+		createGuest,
 		createProject,
 		createSequence,
 		upload,

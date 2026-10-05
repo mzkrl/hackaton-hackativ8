@@ -179,3 +179,35 @@ export const deleteObject = async (key: string) => {
 	const { client, bucket } = getStorage();
 	await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
 };
+
+/**
+ * Reads an object as UTF-8 text, server-side.
+ *
+ * This is deliberately separate from `presignGet`. A presigned URL hands the
+ * bytes to a browser, which is the right path for a user-initiated download but
+ * useless to the analysis worker: that process needs the sequence itself and has
+ * no browser to hand a URL to. Going through S3 directly also keeps the object
+ * key and credentials on the server.
+ *
+ * The size cap is a guard against pulling an arbitrarily large object into the
+ * worker's heap. `MAX_OBJECT_BYTES` already bounds what uploads may create, so
+ * exceeding it means the object was not written by this API.
+ */
+export const getObjectText = async (key: string): Promise<string> => {
+	const { client, bucket } = getStorage();
+	const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+
+	if (result.ContentLength !== undefined && result.ContentLength > MAX_OBJECT_BYTES) {
+		throw new ApiError(
+			413,
+			"FILE_TOO_LARGE",
+			`Stored object exceeds the ${MAX_OBJECT_BYTES} byte limit.`,
+		);
+	}
+
+	if (!result.Body) {
+		throw new ApiError(404, "OBJECT_NOT_FOUND", "Stored object has no body.");
+	}
+
+	return result.Body.transformToString("utf-8");
+};

@@ -17,11 +17,19 @@ export type User = {
 };
 
 export type Project = {
-	id: string;
-	userId: string;
-	name: string;
-	createdAt: string;
-	updatedAt: string;
+  id: string;
+  /**
+   * Exactly one of these identifies the owner, so for a guest project `userId`
+   * is null and `guestId` is set. Typed honestly rather than as `userId: string`
+   * because that version compiles fine and then hands a null into any code that
+   * reads it — the failure would surface at runtime, in a guest's session, as
+   * an unrelated-looking crash.
+   */
+  userId: string | null;
+  guestId: string | null;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type Sequence = {
@@ -89,7 +97,25 @@ export type ObjectDownload = {
 
 /* ---------------------------------------------------------------- auth --- */
 
-export const getMe = () => apiFetch<{ user: User }>("/auth/me").then((d) => d.user);
+/**
+ * Who the API says is calling.
+ *
+ * A guest is a real principal with its own data, not a degraded user. The `kind`
+ * is what the workspace uses to decide what to render and what to offer — a
+ * guest gets a "sign up to save" banner, a user does not.
+ */
+export type Principal =
+	| { kind: "user"; user: User }
+	| GuestSession;
+
+/** What `POST /auth/guest` issues and what `/auth/me` reports for a guest. */
+export type GuestSession = {
+	kind: "guest";
+	id: string;
+	expiresAt: string;
+};
+
+export const getMe = () => apiFetch<Principal>("/auth/me");
 
 export const register = (body: { name: string; email: string; password: string }) =>
 	apiFetch<{ user: User }>("/auth/register", { method: "POST", body: JSON.stringify(body) }).then(
@@ -103,6 +129,49 @@ export const login = (body: { email: string; password: string }) =>
 
 export const logout = () =>
 	apiFetch<{ success: boolean }>("/auth/logout", { method: "POST" }).then(() => undefined);
+
+/**
+ * Starts a guest session.
+ *
+ * The token is returned in the body because the cookie is HttpOnly and cannot be
+ * read from JavaScript. The frontend stores it so that, if the visitor later
+ * signs up, the guest's data can be claimed by the new account.
+ */
+export const startGuest = () =>
+	apiFetch<GuestSession>("/auth/guest", {
+		method: "POST",
+	});
+
+/**
+ * Moves a guest's projects, sequences, analyses, conversations and reports into a
+ * real account, then deletes the guest session.
+ *
+ * Idempotent: a second call is a no-op, so a retry after a partial failure is safe.
+ */
+export const claimGuest = (guestId: string) =>
+	apiFetch<{ claimed: boolean }>("/guest/claim", {
+		method: "POST",
+		body: JSON.stringify({ guestId }),
+	});
+
+/* ------------------------------------------------------- guest token --- */
+
+const GUEST_TOKEN_KEY = "gia.guest-token";
+
+export const storeGuestToken = (token: string) => {
+	if (typeof window === "undefined") return;
+	window.localStorage.setItem(GUEST_TOKEN_KEY, token);
+};
+
+export const readGuestToken = (): string | null => {
+	if (typeof window === "undefined") return null;
+	return window.localStorage.getItem(GUEST_TOKEN_KEY);
+};
+
+export const clearGuestToken = () => {
+	if (typeof window === "undefined") return;
+	window.localStorage.removeItem(GUEST_TOKEN_KEY);
+};
 
 /* ------------------------------------------------------------ projects --- */
 
