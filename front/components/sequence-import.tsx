@@ -13,7 +13,6 @@ import {
 	hashSequence,
 	parseFastaRecords,
 	summariseAllSequences,
-	summariseSequence,
 } from "../lib/sequence";
 import { Button, Notice, Panel, TextArea, Field, cx } from "./primitives";
 
@@ -112,7 +111,7 @@ function FileImport({
 	const badExtension = file !== null && !hasAllowedExtension(file.name);
 
 	const detectRecords = async (f: File) => {
-		if (!f.name.toLowerCase().match(/\.(fa|fasta|fna|fa)$/)) {
+		if (!f.name.toLowerCase().match(/\.(fa|fasta|fna)$/)) {
 			setRecordCount(null);
 			return;
 		}
@@ -158,10 +157,9 @@ function FileImport({
 					);
 				}
 
-				// Create additional sequence rows for records 2..N
-				// The first record's row was already created by presignUpload
-				const { createPastedSequence } = await import("../lib/genomics");
-				await Promise.all(
+// Create additional sequence rows for records 2..N
+					// The first record's row was already created by presignUpload
+					await Promise.all(
 					records.slice(1).map((record) =>
 						createPastedSequence(projectId, {
 							format: "fasta",

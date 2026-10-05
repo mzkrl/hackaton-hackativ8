@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { describeError, isApiConfigured, isUnauthorized } from "../lib/api";
 import {
@@ -240,22 +240,60 @@ function useDashboardData() {
 		setMessages(activeId ? await listConversations(activeId) : []);
 	}, [activeId]);
 
-	const refresh = useCallback(async () => {
-		try {
-			const [nextProjects, nextSequences, nextMessages] = await Promise.all([
-				listProjects(),
-				activeId ? listSequences(activeId) : Promise.resolve([]),
-				activeId ? listConversations(activeId) : Promise.resolve([]),
-			]);
-			setProjects(nextProjects);
-			setSequences(nextSequences);
-			setMessages(nextMessages);
-			await refreshAnalyses();
-			setError(null);
-		} catch (caught) {
-			setError(describeError(caught));
-		}
-	}, [activeId, refreshAnalyses]);
+	/**
+	 * Reload everything.
+	 *
+	 * Takes an optional `projectId` so a caller that already knows which project it
+	 * wants -- project creation, in practice -- can refresh against that one. The
+	 * captured `activeId` is no use there: `setSelectedId` has not been committed
+	 * by the time such a caller wants to reload, so reading `activeId` fetches the
+	 * *previous* project's sequences and notes and leaves them on screen.
+	 */
+	const refresh = useCallback(
+		async (projectId?: string) => {
+			const target = projectId ?? activeId;
+			try {
+				const [nextProjects, nextSequences, nextMessages] = await Promise.all([
+					listProjects(),
+					target ? listSequences(target) : Promise.resolve([]),
+					target ? listConversations(target) : Promise.resolve([]),
+				]);
+				setProjects(nextProjects);
+				// Pin the selection to what was actually fetched, so the boards and
+				// the highlighted row can never describe two different projects.
+				if (target) setSelectedId(target);
+				setSequences(nextSequences);
+				setMessages(nextMessages);
+				await refreshAnalyses();
+				setError(null);
+			} catch (caught) {
+				setError(describeError(caught));
+			}
+		},
+		[activeId, refreshAnalyses],
+	);
+
+	/**
+	 * Create a project and make it the selected one.
+	 *
+	 * The order is the entire fix. Reloading first and selecting afterwards renders
+	 * the previous project's sequences, analyses and notes for a beat, which is
+	 * exactly what read as "creating a new project just points at the last one".
+	 * Refreshing *against the new id* means the boards that appear are already the
+	 * new project's, and there is no window in which the old data is on screen.
+	 *
+	 * `createProject` is allowed to throw so the caller's form can show the message
+	 * next to the input that caused it; `refresh` reports its own failures through
+	 * the banner instead.
+	 */
+	const createAndSelect = useCallback(
+		async (name: string) => {
+			const created = await createProject(name.trim());
+			await refresh(created.id);
+			return created;
+		},
+		[refresh],
+	);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -345,6 +383,7 @@ function useDashboardData() {
 		setQueueBlock,
 		refresh,
 		refreshAnalyses,
+		createAndSelect,
 		reloadSequences,
 		reloadMessages,
 		track,
@@ -387,6 +426,7 @@ function DashboardContent({
 		activeId,
 		project,
 		sequenceLabels,
+		createAndSelect,
 	} = data;
 
 	/**
@@ -397,6 +437,13 @@ function DashboardContent({
 	 * button not working. The local reset happens either way, so a failed request
 	 * still leaves a usable logged-out screen.
 	 */
+	/**
+	 * The sidebar gets a ref to this so the "New project" action above it can put
+	 * the caret in the field rather than being another control that scrolls to
+	 * somewhere and leaves the user to work out what to do next.
+	 */
+	const newProjectRef = useRef<HTMLInputElement>(null);
+
 	const signOut = async () => {
 		try {
 			await endSession();
@@ -407,7 +454,26 @@ function DashboardContent({
 
 	return (
 		<AppShell
-			action={{ label: "New Analysis", href: "#new-analysis", icon: <PlusIcon className="size-4" /> }}
+			action={{
+				label: "New project",
+				onClick: () => newProjectRef.current?.focus(),
+				icon: <PlusIcon className="size-4" />,
+			}}
+			/*
+			 * The projects list. This slot used to be passed nothing at all, so the
+			 * sidebar rendered an empty scroll area between the nav and the footer --
+			 * the projects existed, they were simply never drawn anywhere in the
+			 * sidebar, which is why creating one appeared to do nothing.
+			 */
+			recent={
+				<SidebarProjects
+					projects={projects}
+					selectedId={activeId}
+					onSelect={setSelectedId}
+					onCreate={createAndSelect}
+					nameRef={newProjectRef}
+				/>
+			}
 			account={
 				user
 					? {
@@ -439,7 +505,7 @@ function DashboardContent({
 					projects={projects}
 					selectedId={activeId}
 					onSelect={setSelectedId}
-					onCreated={refresh}
+					onCreate={createAndSelect}
 				/>
 
 				{loading ? (
@@ -601,36 +667,132 @@ const countBySequence = (analyses: Analysis[]) => {
 	return counts;
 };
 
-function ProjectPicker({
-	projects,
-	selectedId,
-	onSelect,
-	onCreated,
-}: {
-	projects: Project[];
-	selectedId: string | null;
-	onSelect: (id: string) => void;
-	onCreated: () => Promise<void>;
-}) {
+/**
+ * Shared plumbing for the two places a project can be created.
+ *
+ * Both the sidebar and the main panel submit a name and get the same
+ * `onCreate(name)` back, so there is exactly one definition of what "creating a
+ * project" does to the screen -- and it is `createAndSelect` in `useDashboardData`,
+ * which refreshes against the new id. Neither form does its own reload.
+ */
+function useProjectCreator(onCreate: (name: string) => Promise<Project>) {
 	const [name, setName] = useState("");
 	const [error, setError] = useState<string | null>(null);
 	const [busy, setBusy] = useState(false);
 
-	const create = async (event: React.FormEvent) => {
+	const submit = async (event: React.FormEvent) => {
 		event.preventDefault();
+		const trimmed = name.trim();
+		// Guarded here as well as on the button: Enter reaches submit directly.
+		if (trimmed.length === 0 || busy) return;
+
 		setError(null);
 		setBusy(true);
 		try {
-			const project = await createProject(name.trim());
+			await onCreate(trimmed);
 			setName("");
-			await onCreated();
-			onSelect(project.id);
 		} catch (caught) {
+			// The name is deliberately left in the field: losing it would make a
+			// failure -- a quota rejection, most likely -- cost the user their typing.
 			setError(describeError(caught));
 		} finally {
 			setBusy(false);
 		}
 	};
+
+	return { name, setName, error, busy, submit };
+}
+
+/**
+ * The sidebar's project list, plus the inline form that creates one.
+ *
+ * `aria-current="page"` on the selected row rather than a colour alone, since the
+ * selected row is the only thing telling the user which project the boards below
+ * belong to.
+ */
+function SidebarProjects({
+	projects,
+	selectedId,
+	onSelect,
+	onCreate,
+	nameRef,
+}: {
+	projects: Project[];
+	selectedId: string | null;
+	onSelect: (id: string) => void;
+	onCreate: (name: string) => Promise<Project>;
+	nameRef: React.RefObject<HTMLInputElement | null>;
+}) {
+	const { name, setName, error, busy, submit } = useProjectCreator(onCreate);
+
+	return (
+		<section className="flex flex-col gap-3">
+			<h2 className="text-[11px] font-bold uppercase tracking-wider text-muted">Projects</h2>
+
+			{projects.length === 0 ? (
+				<p className="text-[12px] leading-relaxed text-muted">
+					No projects yet. Name one below to get started.
+				</p>
+			) : (
+				<ul className="flex flex-col gap-1">
+					{projects.map((item) => {
+						const current = item.id === selectedId;
+						return (
+							<li key={item.id}>
+								<button
+									type="button"
+									onClick={() => onSelect(item.id)}
+									aria-current={current ? "page" : undefined}
+									className={cx(
+										"flex w-full min-w-0 items-center gap-2 rounded-lg px-2 py-1.5 text-left text-[13px] transition-colors",
+										current
+											? "bg-forest/10 font-semibold text-forest"
+											: "text-muted hover:bg-forest/5 hover:text-forest",
+									)}
+								>
+									<span className="min-w-0 truncate">{item.name}</span>
+								</button>
+							</li>
+						);
+					})}
+				</ul>
+			)}
+
+			<form onSubmit={submit} className="flex min-w-0 flex-col gap-2">
+				<label className="text-[12px] font-semibold text-forest" htmlFor="sidebar-new-project">
+					New project
+				</label>
+				<input
+					id="sidebar-new-project"
+					ref={nameRef}
+					value={name}
+					onChange={(event) => setName(event.target.value)}
+					placeholder="Mito study"
+					disabled={busy}
+					maxLength={120}
+					className="min-w-0 rounded-lg border border-line-strong bg-paper px-2 py-1.5 text-[13px] text-forest outline-none placeholder:text-muted focus:border-teal-ink disabled:opacity-60"
+				/>
+				<Button type="submit" variant="primary" disabled={busy || name.trim().length === 0}>
+					{busy ? "Creating…" : "Create project"}
+				</Button>
+				{error ? <Notice tone="error">{error}</Notice> : null}
+			</form>
+		</section>
+	);
+}
+
+function ProjectPicker({
+	projects,
+	selectedId,
+	onSelect,
+	onCreate,
+}: {
+	projects: Project[];
+	selectedId: string | null;
+	onSelect: (id: string) => void;
+	onCreate: (name: string) => Promise<Project>;
+}) {
+	const { name, setName, error, busy, submit } = useProjectCreator(onCreate);
 
 	return (
 		<Panel title="Projects">
@@ -658,7 +820,7 @@ function ProjectPicker({
 					</div>
 				)}
 
-				<form onSubmit={create} className="flex flex-wrap items-end gap-2">
+				<form onSubmit={submit} className="flex flex-wrap items-end gap-2">
 					<div className="min-w-48 flex-1">
 						<Field
 							label="New project"

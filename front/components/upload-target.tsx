@@ -48,23 +48,78 @@ export function UploadTarget({
 }: UploadTargetProps) {
 	const [over, setOver] = useState(false);
 	const inputRef = useRef<HTMLInputElement>(null);
+	const dragDepth = useRef(0);
 
 	const onDrop = (event: DragEvent<HTMLDivElement>) => {
 		event.preventDefault();
+		dragDepth.current = 0;
 		setOver(false);
 		if (disabled) return;
 		// `files` rather than a copy: the handler owns it from here.
 		if (event.dataTransfer.files.length > 0) onFiles?.(event.dataTransfer.files);
 	};
 
+	const onDragEnter = (event: DragEvent<HTMLDivElement>) => {
+		event.preventDefault();
+		if (disabled) return;
+		// Only highlight when dragging files, not arbitrary page content.
+		if (!event.dataTransfer.types.includes("Files")) return;
+		dragDepth.current += 1;
+		setOver(true);
+	};
+
+	const onDragOver = (event: DragEvent<HTMLDivElement>) => {
+		event.preventDefault();
+		if (disabled) return;
+		if (!event.dataTransfer.types.includes("Files")) return;
+		// Required to allow the drop event to fire.
+		event.dataTransfer.dropEffect = "copy";
+	};
+
+const onDragLeave = (event: DragEvent<HTMLDivElement>) => {
+			event.preventDefault();
+			/*
+			 * `relatedTarget === null` means the pointer left the window entirely
+			 * rather than moving onto a child. Chrome does not always deliver the
+			 * matching `dragenter` when the drag comes back, so without this the
+			 * counter stays positive and the box is left stuck in the teal
+			 * drag-over state after the cursor is gone.
+			 */
+			if (event.relatedTarget === null) {
+				dragDepth.current = 0;
+				setOver(false);
+				return;
+			}
+			dragDepth.current -= 1;
+			if (dragDepth.current <= 0) {
+				dragDepth.current = 0;
+				setOver(false);
+			}
+		};
+
+	const openFilePicker = () => {
+		if (disabled) return;
+		inputRef.current?.click();
+	};
+
 	return (
 		<div
-			onDragOver={(event) => {
-				event.preventDefault();
-				if (!disabled) setOver(true);
-			}}
-			onDragLeave={() => setOver(false)}
+			onDragEnter={onDragEnter}
+			onDragOver={onDragOver}
+			onDragLeave={onDragLeave}
 			onDrop={onDrop}
+			onClick={openFilePicker}
+			role="button"
+			tabIndex={disabled ? -1 : 0}
+			aria-label="Upload a FASTA file"
+			aria-disabled={disabled}
+			onKeyDown={(event) => {
+				if (disabled) return;
+				if (event.key === "Enter" || event.key === " ") {
+					event.preventDefault();
+					openFilePicker();
+				}
+			}}
 			className={cx(
 				/*
 				 * `flex-col` + `justify-center` puts the icon above the caption in
@@ -73,7 +128,7 @@ export function UploadTarget({
 				 * the box. `gap-[18px]` is the brief's number; Tailwind has no gap
 				 * step at 18, hence the arbitrary value.
 				 */
-				"flex flex-col items-center justify-center gap-[18px] overflow-hidden rounded-[14px] border-2 border-dashed px-6 text-center",
+				"flex cursor-pointer flex-col items-center justify-center gap-[18px] overflow-hidden rounded-[14px] border-2 border-dashed px-6 text-center",
 				/*
 				 * Drag-over swaps to the ink teal. It is the only signal that the
 				 * target is live, and maroon-on-maroon would be invisible.
@@ -99,20 +154,26 @@ export function UploadTarget({
 			) : null}
 
 			{/*
-			 * The whole box is the drop target but it is not itself focusable --
-			 * the input is. Making the div a tab stop as well would put two tab
-			 * stops on one control.
+			 * The whole box is the drop target, and since it now opens the picker
+			 * on click and on Enter/Space it is the accessible control: role=button
+			 * plus a tab stop. The input is therefore `tabIndex={-1}` and hidden
+			 * from assistive tech -- leaving it focusable would put two tab stops
+			 * on one control, and `pointer-events-none` stops a click landing on
+			 * the input and bubbling back up to re-trigger `click()`.
 			 */}
 			<input
 				ref={inputRef}
 				type="file"
 				accept={accept}
 				disabled={disabled}
-				aria-label="Upload a FASTA file"
+				tabIndex={-1}
+				aria-hidden="true"
+				className="pointer-events-none sr-only"
 				onChange={(event) => {
 					if (event.target.files?.length) onFiles?.(event.target.files);
+					// Reset so picking the same file twice still fires onChange.
+					event.target.value = "";
 				}}
-				className="sr-only"
 			/>
 		</div>
 	);

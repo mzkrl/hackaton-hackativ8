@@ -1,6 +1,6 @@
 "use client";
 
-import type { FormEvent } from "react";
+import { useRef, type FormEvent } from "react";
 
 import { ArrowUpRightIcon, PaperclipIcon } from "./brand";
 import { cx } from "./primitives";
@@ -54,12 +54,19 @@ export function ChatBar({
 	disabled = false,
 	label,
 	className,
-}: ChatBarProps) {
+	onAttach,
+}: ChatBarProps & { onAttach?: (files: FileList) => void }) {
 	const filled = variant === "filled";
+	const attachInputRef = useRef<HTMLInputElement>(null);
 
 	const submit = (event: FormEvent) => {
 		event.preventDefault();
 		onSubmit?.();
+	};
+
+	const handleAttach = () => {
+		if (disabled) return;
+		attachInputRef.current?.click();
 	};
 
 	return (
@@ -83,6 +90,7 @@ export function ChatBar({
 			<button
 				type="button"
 				disabled={disabled}
+				onClick={handleAttach}
 				aria-label="Attach a FASTA file"
 				className={cx(
 					"shrink-0 rounded-full transition-colors",
@@ -93,6 +101,19 @@ export function ChatBar({
 			>
 				<PaperclipIcon size={20} />
 			</button>
+
+			{/* Hidden file input for the attach button */}
+			<input
+				ref={attachInputRef}
+				type="file"
+				accept=".fasta,.fa,.fna,.gb,.gbk,.genbank,.txt,.csv,.tsv,.json,.pdf"
+				disabled={disabled}
+				className="sr-only"
+				onChange={(event) => {
+					if (event.target.files?.length) onAttach?.(event.target.files);
+					event.target.value = "";
+				}}
+			/>
 
 			<label className="sr-only" htmlFor={`chat-${variant}`}>
 				{label}
