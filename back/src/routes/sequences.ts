@@ -5,6 +5,7 @@ import { getDb } from "../db/client";
 import { sequences } from "../db/schema";
 import { requirePrincipal } from "../lib/current-user";
 import { assertProjectOwner } from "../lib/ownership";
+import { assertCanCreateSequence } from "../lib/quota";
 
 const sequenceParams = t.Object({ id: t.String({ format: "uuid" }) });
 
@@ -28,6 +29,7 @@ export const sequencesRoutes = new Elysia()
 		async ({ request, params, body, status }) => {
 			const principal = await requirePrincipal(request);
 			await assertProjectOwner(params.id, principal);
+			await assertCanCreateSequence(params.id, principal);
 
 			const [sequence] = await getDb()
 				.insert(sequences)

@@ -11,6 +11,7 @@ node_modules
 
 #why? this worked by multiple people, so it wont clash with the .md files that are already in the repo. the only truly useful .md are in the folder of each service.
 #DONT you dare to disobey this, im in control.
+.opencode
 *.md
 !CONNECTION.md
 

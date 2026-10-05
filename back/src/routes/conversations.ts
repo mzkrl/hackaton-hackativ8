@@ -5,6 +5,7 @@ import { getDb } from "../db/client";
 import { conversations } from "../db/schema";
 import { requirePrincipal } from "../lib/current-user";
 import { assertProjectOwner } from "../lib/ownership";
+import { assertCanCreateConversation } from "../lib/quota";
 
 const conversationParams = t.Object({ projectId: t.String({ format: "uuid" }) });
 
@@ -36,6 +37,7 @@ export const conversationsRoutes = new Elysia()
 		async ({ request, body, status }) => {
 			const principal = await requirePrincipal(request);
 			await assertProjectOwner(body.projectId, principal);
+			await assertCanCreateConversation(body.projectId, principal);
 
 			const [conversation] = await getDb()
 				.insert(conversations)

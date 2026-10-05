@@ -7,6 +7,7 @@ import { ApiError } from "../lib/api-error";
 import { assertAllowedAnalysisType } from "../lib/analysis-types";
 import { requirePrincipal } from "../lib/current-user";
 import { findOwnedAnalysis, findOwnedSequence } from "../lib/ownership";
+import { assertCanCreateAnalysis } from "../lib/quota";
 import { assertQueueConfigured, enqueueAnalysis, queueStatus } from "../lib/queue";
 import { enforce, RATE_LIMITS } from "../lib/rate-limit";
 import { readCachedStatus, writeCachedStatus } from "../lib/analysis-status-cache";
@@ -37,6 +38,7 @@ export const analysesRoutes = new Elysia()
 		async ({ request, body, status }) => {
 			const principal = await requirePrincipal(request);
 			const sequence = await findOwnedSequence(body.sequenceId, principal);
+			await assertCanCreateAnalysis(sequence.id, principal);
 
 			// Keyed on the session-derived principal id, not on anything the caller
 			// supplied. Each queued job is a row plus a Redis entry and eventually a

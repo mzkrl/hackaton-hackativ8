@@ -43,6 +43,13 @@ const IUPAC = /^[ACGTRYSWKMBDHVNacgtryswkmbdhvn\s]+$/;
  * Digits and spaces are stripped from the residue lines; every other character is
  * preserved so an unexpected symbol surfaces as a validation error rather than
  * being silently deleted and corrupting the sequence.
+ *
+ * Multi-record FASTA: returns the first record's sequence. This is the
+ * conventional reading of "the sequence" and is at least predictable. The
+ * frontend now creates N sequence rows for N records (see
+ * `front/components/sequence-import.tsx`), so each row's `sequenceLength`
+ * describes its own record. The worker processes one sequence row at a time,
+ * so this function only ever sees one record's worth of data.
  */
 export const parseSequenceText = (raw: string): string => {
 	const lines = raw.split(/\r?\n/);

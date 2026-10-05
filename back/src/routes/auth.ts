@@ -5,6 +5,7 @@ import { getDb } from "../db/client";
 import { guestSessions, users } from "../db/schema";
 import { ApiError } from "../lib/api-error";
 import { newGuestToken, requirePrincipal } from "../lib/current-user";
+import { assertNotDisposableEmail } from "../lib/disposable-email";
 import {
 	dummyPasswordHash,
 	hashPassword,
@@ -87,6 +88,8 @@ export const authRoutes = new Elysia()
 			if (name.length === 0) {
 				throw new ApiError(422, "VALIDATION_ERROR", "Name cannot be blank.");
 			}
+
+			assertNotDisposableEmail(email);
 
 			const [existing] = await getDb()
 				.select({ id: users.id })

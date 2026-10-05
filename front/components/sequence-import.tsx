@@ -10,6 +10,9 @@ import {
 	MAX_PROXY_UPLOAD_BYTES,
 	formatBytes,
 	hasAllowedExtension,
+	hashSequence,
+	parseFastaRecords,
+	summariseAllSequences,
 	summariseSequence,
 } from "../lib/sequence";
 import { Button, Notice, Panel, TextArea, Field, cx } from "./primitives";
@@ -103,15 +106,78 @@ function FileImport({
 }) {
 	const [file, setFile] = useState<File | null>(null);
 	const [description, setDescription] = useState("");
+	const [recordCount, setRecordCount] = useState<number | null>(null);
 
 	const tooLarge = file !== null && file.size > MAX_DIRECT_UPLOAD_BYTES;
 	const badExtension = file !== null && !hasAllowedExtension(file.name);
+
+	const detectRecords = async (f: File) => {
+		if (!f.name.toLowerCase().match(/\.(fa|fasta|fna|fa)$/)) {
+			setRecordCount(null);
+			return;
+		}
+		try {
+			const text = await f.text();
+			const records = parseFastaRecords(text);
+			setRecordCount(records.length);
+		} catch {
+			setRecordCount(null);
+		}
+	};
 
 	const presign = () =>
 		onRun(async () => {
 			if (!file) throw new Error("Choose a file first.");
 			if (tooLarge) throw new Error(`That file is ${formatBytes(file.size)}; the limit is 100 MB.`);
 			if (badExtension) throw new Error(`Allowed extensions: ${ALLOWED_EXTENSIONS.join(", ")}.`);
+
+			// For multi-record FASTA, read the file and create N sequence rows
+			const isMultiRecordFasta = recordCount !== null && recordCount > 1;
+			if (isMultiRecordFasta) {
+				const text = await file.text();
+				const records = parseFastaRecords(text);
+
+				// Upload the file once, then create N sequence rows pointing to the same object
+				const grant = await presignUpload({
+					projectId,
+					filename: file.name,
+					contentType: file.type || "application/octet-stream",
+					sizeBytes: file.size,
+					description: description.trim() || null,
+				});
+
+				const put = await fetch(grant.uploadUrl, {
+					method: "PUT",
+					headers: { "content-type": file.type || "application/octet-stream" },
+					body: file,
+				});
+
+				if (!put.ok) {
+					throw new Error(
+						`Storage rejected the upload (${put.status}). The sequence row was created but the file is not attached.`,
+					);
+				}
+
+				// Create additional sequence rows for records 2..N
+				// The first record's row was already created by presignUpload
+				const { createPastedSequence } = await import("../lib/genomics");
+				await Promise.all(
+					records.slice(1).map((record) =>
+						createPastedSequence(projectId, {
+							format: "fasta",
+							sequenceLength: record.sequence.length,
+							sequenceHash: hashSequence(record.sequence),
+							description: description.trim() || null,
+							recordId: record.recordId,
+						}),
+					),
+				);
+
+				setFile(null);
+				setDescription("");
+				setRecordCount(null);
+				return `Uploaded ${file.name} (${formatBytes(file.size)}) with ${records.length} records — created ${records.length} sequences.`;
+			}
 
 			const grant = await presignUpload({
 				projectId,
@@ -137,6 +203,7 @@ function FileImport({
 
 			setFile(null);
 			setDescription("");
+			setRecordCount(null);
 			return `Uploaded ${file.name} (${formatBytes(file.size)}).`;
 		});
 
@@ -167,7 +234,12 @@ function FileImport({
 				label="File"
 				type="file"
 				accept={ALLOWED_EXTENSIONS.join(",")}
-				onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+				onChange={(e) => {
+					const f = e.target.files?.[0] ?? null;
+					setFile(f);
+					setRecordCount(null);
+					if (f) detectRecords(f);
+				}}
 				disabled={busy}
 				hint={
 					<span>
@@ -190,6 +262,7 @@ function FileImport({
 				<p className="text-xs text-muted">
 					{file.name} · {formatBytes(file.size)}
 					{badExtension ? " · unsupported extension" : ""}
+					{recordCount !== null && recordCount > 1 ? ` · ${recordCount} FASTA records` : ""}
 				</p>
 			) : null}
 
@@ -217,7 +290,9 @@ function PasteImport({
 	const [text, setText] = useState("");
 	const [description, setDescription] = useState("");
 
-	const summary = useMemo(() => (text.trim() ? summariseSequence(text) : null), [text]);
+	const summaries = useMemo(() => (text.trim() ? summariseAllSequences(text) : []), [text]);
+	const summary = summaries[0] ?? null;
+	const isMultiRecord = summaries.length > 1;
 
 	return (
 		<div className="flex flex-col gap-3">
@@ -228,7 +303,7 @@ function PasteImport({
 				onChange={(e) => setText(e.target.value)}
 				placeholder={">NC_000001\nGATTACA..."}
 				disabled={busy}
-				hint="FASTA and GenBank headers are recognised; the rest is measured as typed."
+				hint="FASTA and GenBank headers are recognised; the rest is measured as typed. Multi-record FASTA is supported — each record becomes a separate sequence."
 			/>
 
 			<Field
@@ -250,6 +325,14 @@ function PasteImport({
 					) : null}
 					{" · "}
 					{summary.sequenceLength.toLocaleString()} residues
+					{isMultiRecord ? (
+						<>
+							{" · "}
+							<strong className="font-medium text-forest dark:text-night-muted">
+								{summaries.length} records detected
+							</strong>
+						</>
+					) : null}
 				</p>
 			) : null}
 
@@ -258,21 +341,41 @@ function PasteImport({
 				disabled={busy || !summary || summary.sequenceLength < 1}
 				onClick={() =>
 					onRun(async () => {
-						if (!summary) throw new Error("Nothing to register.");
-						const sequence = await createPastedSequence(projectId, {
-							format: summary.format,
-							sequenceLength: summary.sequenceLength,
-							sequenceHash: summary.sequenceHash,
-							description: description.trim() || null,
-							...(summary.recordId ? { recordId: summary.recordId } : {}),
-						});
+						if (summaries.length === 0) throw new Error("Nothing to register.");
+
+						if (summaries.length === 1) {
+							const s = summaries[0];
+							const sequence = await createPastedSequence(projectId, {
+								format: s.format,
+								sequenceLength: s.sequenceLength,
+								sequenceHash: s.sequenceHash,
+								description: description.trim() || null,
+								...(s.recordId ? { recordId: s.recordId } : {}),
+							});
+							setText("");
+							setDescription("");
+							return `Registered ${sequence.format} sequence, ${(sequence.sequenceLength ?? 0).toLocaleString()} residues.`;
+						}
+
+						// Multi-record: create one sequence row per record
+						const created = await Promise.all(
+							summaries.map((s) =>
+								createPastedSequence(projectId, {
+									format: s.format,
+									sequenceLength: s.sequenceLength,
+									sequenceHash: s.sequenceHash,
+									description: description.trim() || null,
+									...(s.recordId ? { recordId: s.recordId } : {}),
+								}),
+							),
+						);
 						setText("");
 						setDescription("");
-						return `Registered ${sequence.format} sequence, ${(sequence.sequenceLength ?? 0).toLocaleString()} residues.`;
+						return `Registered ${created.length} sequences from multi-record ${created[0]?.format ?? "fasta"} input.`;
 					})
 				}
 			>
-				{busy ? "Registering…" : "Register sequence"}
+				{busy ? "Registering…" : isMultiRecord ? `Register ${summaries.length} sequences` : "Register sequence"}
 			</Button>
 		</div>
 	);

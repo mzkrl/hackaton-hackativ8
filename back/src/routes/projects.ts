@@ -5,6 +5,7 @@ import { getDb } from "../db/client";
 import { projects } from "../db/schema";
 import { ApiError } from "../lib/api-error";
 import { requirePrincipal } from "../lib/current-user";
+import { assertCanCreateProject } from "../lib/quota";
 
 const projectParams = t.Object({ id: t.String({ format: "uuid" }) });
 
@@ -26,6 +27,8 @@ export const projectsRoutes = new Elysia()
 					"Project name cannot be blank.",
 				);
 			}
+
+			await assertCanCreateProject(principal);
 
 			const values =
 				principal.kind === "guest"
