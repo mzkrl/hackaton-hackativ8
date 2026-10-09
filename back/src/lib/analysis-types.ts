@@ -10,10 +10,18 @@ import { ApiError } from "./api-error";
  * unrecognised type is a bug or an attempt to reach something unintended, and
  * both deserve a 422 rather than a job.
  *
- * Defaults come from AGENTS.md §4.10. Override with `ANALYSIS_ALLOWED_TYPES`
- * when the Bio Service exposes a different set:
+ * Defaults mirror the Bio Service's `available_tools` (from its `GET /`):
  *
- *   ANALYSIS_ALLOWED_TYPES=gc_content,orfs,translate,blast
+ *   calculate_gc_content          calculate_nucleotide_composition
+ *   detect_sequence_type          extract_sequence_features
+ *   find_orfs                     parse_fasta
+ *   sequence_statistics           translate_sequence
+ *   validate_sequence
+ *
+ * Override with `ANALYSIS_ALLOWED_TYPES` when the service exposes a different
+ * set:
+ *
+ *   ANALYSIS_ALLOWED_TYPES=gc_content,orfs,translate,sequence_statistics
  *
  * An unset or empty variable falls back to the defaults above rather than to an
  * empty list, so a missing config cannot silently reject every legitimate
@@ -21,14 +29,19 @@ import { ApiError } from "./api-error";
  * are used, so the allowlist can never end up wide open by accident.
  */
 export const DEFAULT_ANALYSIS_TYPES = [
-	"gc_content",
+	// 1:1 with a Bio Service tool.
+	"gc_content", // calculate_gc_content
+	"composition", // calculate_nucleotide_composition
+	"orfs", // find_orfs
+	"translate", // translate_sequence
+	"sequence_statistics", // sequence_statistics
+	"detect_sequence_type", // detect_sequence_type
+	"extract_sequence_features", // extract_sequence_features
+	"validate_sequence", // validate_sequence
+	"parse_fasta", // parse_fasta
+
+	// Derived: AT% = A% + T%, read off calculate_nucleotide_composition.
 	"at_content",
-	"composition",
-	"orfs",
-	"translate",
-	"reverse_complement",
-	"blast",
-	"genbank_record",
 ] as const;
 
 export type AnalysisType = (typeof DEFAULT_ANALYSIS_TYPES)[number];

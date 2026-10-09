@@ -55,8 +55,8 @@ Analyst LLM in front of it, feed ``Insight Input`` into the LLM's ``input_value`
 the LLM's system prompt already expects ``{user_question, analysis_results}``.
 
 The tool mapping mirrors ``back/src/lib/analysis-tool-map.ts`` (the Bio service's
-tool names differ from GenePilot's analysis-type names) and the types the service
-cannot serve are rejected rather than swapped for a look-alike tool.
+tool names differ from GenePilot's analysis-type names), and a type with no
+matching tool is rejected rather than swapped for a look-alike one.
 """
 
 from __future__ import annotations
@@ -79,16 +79,13 @@ ANALYSIS_TOOL_MAP: dict[str, list[str]] = {
     "composition": ["calculate_nucleotide_composition"],
     "orfs": ["find_orfs"],
     "translate": ["translate_sequence"],
+    "sequence_statistics": ["sequence_statistics"],
+    "detect_sequence_type": ["detect_sequence_type"],
+    "extract_sequence_features": ["extract_sequence_features"],
+    "validate_sequence": ["validate_sequence"],
+    "parse_fasta": ["parse_fasta"],
     # AT% = A% + T%, derived from the composition tool.
     "at_content": ["calculate_nucleotide_composition"],
-}
-
-# Types with no Bio counterpart. Named explicitly so the failure says *why*
-# instead of "unknown tool" from the service.
-UNSUPPORTED_TYPES: dict[str, str] = {
-    "reverse_complement": "the Bio service has no reverse-complement tool",
-    "blast": "BLAST is an external database search, not a Bio service tool",
-    "genbank_record": "the Bio service has no GenBank parser",
 }
 
 
@@ -242,11 +239,6 @@ class BioAnalysisConnector(Component):
             return [str(tool) for tool in planned]
 
         analysis_type = str(request.get("analysis_type") or "").strip()
-
-        if analysis_type in UNSUPPORTED_TYPES:
-            raise ValueError(
-                f"{analysis_type!r} is not supported: {UNSUPPORTED_TYPES[analysis_type]}."
-            )
 
         tools = ANALYSIS_TOOL_MAP.get(analysis_type)
         if not tools:

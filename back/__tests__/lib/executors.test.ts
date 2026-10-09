@@ -224,15 +224,15 @@ describe("Bio Service executor", () => {
 		await expect(runBioAnalysis(job, resolveStub)).rejects.toThrow(/responded with 502/);
 	});
 
-	test("refuses a type the Bio Service cannot perform, without calling it", async () => {
-		// `blast` is a search against external databases; the service has no such
-		// tool. Posting a placeholder name would return 400, so the request is
-		// never made.
+	test("refuses a type with no Bio tool, without calling it", async () => {
+		// `reverse_complement` is not a Bio Service tool (and is no longer an
+		// allowed analysis type). Posting a placeholder name would return 400, so
+		// the request is never made.
 		stubFetch(() => bioOk());
 
 		await expect(
-			runBioAnalysis({ ...job, analysisType: "blast" }, resolveStub),
-		).rejects.toThrow(/cannot perform "blast"/);
+			runBioAnalysis({ ...job, analysisType: "reverse_complement" }, resolveStub),
+		).rejects.toThrow(/Unknown analysis type/);
 		expect(calls).toHaveLength(0);
 	});
 

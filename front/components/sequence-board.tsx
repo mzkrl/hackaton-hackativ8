@@ -6,9 +6,19 @@ import { describeError, isQueueUnavailable } from "../lib/api";
 import { deleteObject, getObjectDownload, queueAnalysis, type Sequence } from "../lib/genomics";
 import { Button, Empty, Notice, Panel, formatDate, cx } from "./primitives";
 
-/** `analysisType` is free-form on the backend (`1..64` chars, dispatched to the
- * Bio service), so these are starting points, not an enum the server enforces. */
-const SUGGESTED_ANALYSES = ["gc_content", "at_content", "translate", "reverse_complement"];
+/** `analysisType` is dispatched to the Bio service, whose `available_tools` these
+ * mirror (`GET /` on the service). The backend allowlists the type, so these are
+ * the tools a user can actually queue. */
+const SUGGESTED_ANALYSES = [
+	"gc_content",
+	"at_content",
+	"translate",
+	"sequence_statistics",
+	"detect_sequence_type",
+	"extract_sequence_features",
+	"validate_sequence",
+	"parse_fasta",
+];
 
 export function SequenceBoard({
 	sequences,

@@ -106,7 +106,7 @@ export const runBioAnalysis = async (
 
 	// Resolved before the request so an unservable type fails immediately instead
 	// of after a round trip, and as unrecoverable so BullMQ does not retry it
-	// three times. `blast` will never start working through this path.
+	// three times: a type with no Bio tool cannot start working by trying again.
 	let tools: readonly string[];
 
 	try {
