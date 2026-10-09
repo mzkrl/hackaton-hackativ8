@@ -70,6 +70,61 @@ export type Translation = {
 	containsStopCodon?: boolean;
 };
 
+/** Base counts with any subset of the four bases. */
+export type BaseCounts = Partial<Record<Base, number>>;
+
+export type SequenceStatistics = {
+	length?: number;
+	baseCounts?: BaseCounts;
+	uniqueBases?: number;
+	mostFrequentBase?: string;
+	leastFrequentBase?: string;
+	ambiguousBaseCount?: number;
+};
+
+export type SequenceTypeInfo = {
+	sequenceType?: string;
+	confidence?: string;
+	reasoning?: string;
+	hasDnaChars?: boolean;
+	hasRnaChars?: boolean;
+	hasProteinOnlyChars?: boolean;
+};
+
+export type SequenceFeatures = {
+	summary?: string;
+	length?: number;
+	isValid?: boolean;
+	sequenceType?: string;
+	typeConfidence?: string;
+	gcContentPercent?: number;
+	baseCounts?: BaseCounts;
+	mostFrequentBase?: string;
+	ambiguousBaseCount?: number;
+	invalidCharacters?: string[];
+};
+
+export type Validation = {
+	isValid?: boolean;
+	iupacDnaValid?: boolean;
+	iupacRnaValid?: boolean;
+	iupacProteinValid?: boolean;
+	sequenceLength?: number;
+	invalidCharacters?: string[];
+	message?: string;
+};
+
+export type FastaRecord = {
+	id?: string;
+	length?: number;
+	description?: string;
+};
+
+export type Fasta = {
+	totalRecords?: number;
+	records: FastaRecord[];
+};
+
 export type AnalysisResult = {
 	record?: SequenceRecord;
 	composition: Composition;
@@ -79,6 +134,16 @@ export type AnalysisResult = {
 	blastHits: BlastHit[];
 	/** Translated protein, when the `translate` tool ran. */
 	translation?: Translation;
+	/** `sequence_statistics` figures. */
+	sequenceStatistics?: SequenceStatistics;
+	/** `detect_sequence_type` call. */
+	sequenceType?: SequenceTypeInfo;
+	/** `extract_sequence_features` summary. */
+	sequenceFeatures?: SequenceFeatures;
+	/** `validate_sequence` IUPAC flags. */
+	validation?: Validation;
+	/** `parse_fasta` record metadata (residue text is stripped server-side). */
+	fasta?: Fasta;
 	/**
 	 * Optional AI interpretation written by the Insight Analyst flow. Prose, not
 	 * data: it is a reasoning layer over the figures, never their source.
@@ -182,6 +247,111 @@ const readTranslation = (value: unknown): Translation | undefined => {
 	};
 };
 
+const bool = (value: unknown): boolean | undefined =>
+	typeof value === "boolean" ? value : undefined;
+
+/** A non-empty string list, or `undefined` when the value is not one. */
+const stringList = (value: unknown): string[] | undefined => {
+	if (!Array.isArray(value)) return undefined;
+	const items = value.flatMap((entry) => {
+		const text = str(entry);
+		return text ? [text] : [];
+	});
+	return items;
+};
+
+const readBaseCounts = (value: unknown): BaseCounts | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+
+	const counts: BaseCounts = {};
+	let seen = 0;
+	for (const base of BASES) {
+		const count = num(source[base]);
+		if (count !== undefined) {
+			counts[base] = count;
+			seen += 1;
+		}
+	}
+	return seen > 0 ? counts : undefined;
+};
+
+const readSequenceStatistics = (value: unknown): SequenceStatistics | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+	return {
+		length: num(source.length),
+		baseCounts: readBaseCounts(source.base_counts),
+		uniqueBases: num(source.unique_bases),
+		mostFrequentBase: str(source.most_frequent_base),
+		leastFrequentBase: str(source.least_frequent_base),
+		ambiguousBaseCount: num(source.ambiguous_base_count),
+	};
+};
+
+const readSequenceType = (value: unknown): SequenceTypeInfo | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+	return {
+		sequenceType: str(source.sequence_type),
+		confidence: str(source.confidence),
+		reasoning: str(source.reasoning),
+		hasDnaChars: bool(source.has_dna_chars),
+		hasRnaChars: bool(source.has_rna_chars),
+		hasProteinOnlyChars: bool(source.has_protein_only_chars),
+	};
+};
+
+const readSequenceFeatures = (value: unknown): SequenceFeatures | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+	return {
+		summary: str(source.summary),
+		length: num(source.length),
+		isValid: bool(source.is_valid),
+		sequenceType: str(source.sequence_type),
+		typeConfidence: str(source.type_confidence),
+		gcContentPercent: num(source.gc_content_percent),
+		baseCounts: readBaseCounts(source.base_counts),
+		mostFrequentBase: str(source.most_frequent_base),
+		ambiguousBaseCount: num(source.ambiguous_base_count),
+		invalidCharacters: stringList(source.invalid_characters),
+	};
+};
+
+const readValidation = (value: unknown): Validation | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+	return {
+		isValid: bool(source.is_valid),
+		iupacDnaValid: bool(source.iupac_dna_valid),
+		iupacRnaValid: bool(source.iupac_rna_valid),
+		iupacProteinValid: bool(source.iupac_protein_valid),
+		sequenceLength: num(source.sequence_length),
+		invalidCharacters: stringList(source.invalid_characters),
+		message: str(source.message),
+	};
+};
+
+const readFasta = (value: unknown): Fasta | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+
+	const records = list(source.records).flatMap((entry) => {
+		const item = record(entry);
+		if (!item) return [];
+		return [
+			{
+				id: str(item.id),
+				length: num(item.length),
+				description: str(item.description),
+			},
+		];
+	});
+
+	return { totalRecords: num(source.total_records), records };
+};
+
 /**
  * Every key the readers above can consume. Anything not in this list falls
  * through to `extra` and is still shown, so a payload from an older or newer
@@ -213,8 +383,23 @@ const CLAIMED_KEYS = new Set([
 	"blast_hits",
 	// translated protein
 	"translation",
+	// sequence statistics / type / features / validation / FASTA
+	"sequence_statistics",
+	"sequenceStatistics",
+	"sequence_type",
+	// Older rows stored the raw tool blob under its service name.
+	"detect_sequence_type",
+	"sequence_features",
+	"extract_sequence_features",
+	"validation",
+	"validate_sequence",
+	"fasta",
+	"parse_fasta",
 	// AI interpretation
 	"insight",
+	// Executor provenance, shown as the footer's "computed by" note rather than
+	// as a data field.
+	"source",
 ]);
 
 export const parseResult = (payload: unknown): AnalysisResult => {
@@ -231,6 +416,15 @@ export const parseResult = (payload: unknown): AnalysisResult => {
 		blastProgram: str(source.program) ?? str(source.blastProgram) ?? str(source.blast_program),
 		blastHits: readHits(source.hits ?? source.blastHits ?? source.blast_hits),
 		translation: readTranslation(source.translation),
+		sequenceStatistics: readSequenceStatistics(
+			source.sequence_statistics ?? source.sequenceStatistics,
+		),
+		sequenceType: readSequenceType(source.sequence_type ?? source.detect_sequence_type),
+		sequenceFeatures: readSequenceFeatures(
+			source.sequence_features ?? source.extract_sequence_features,
+		),
+		validation: readValidation(source.validation ?? source.validate_sequence),
+		fasta: readFasta(source.fasta ?? source.parse_fasta),
 		insight: str(source.insight),
 		extra: {},
 		empty: false,
@@ -248,6 +442,11 @@ export const parseResult = (payload: unknown): AnalysisResult => {
 		result.orfs.length === 0 &&
 		result.blastHits.length === 0 &&
 		!result.translation &&
+		!result.sequenceStatistics &&
+		!result.sequenceType &&
+		!result.sequenceFeatures &&
+		!result.validation &&
+		!result.fasta &&
 		!result.insight &&
 		Object.keys(result.extra).length === 0;
 
@@ -265,4 +464,12 @@ export const deriveGcContent = (composition: Composition): number | undefined =>
 	const total = BASES.reduce((sum, base) => sum + (composition[base] ?? 0), 0);
 	if (total === 0) return undefined;
 	return Number((((composition.G ?? 0) + (composition.C ?? 0)) / total * 100).toFixed(1));
+};
+
+/** AT content implied by the composition, for the same reason as above. */
+export const deriveAtContent = (composition: Composition): number | undefined => {
+	if (!composition) return undefined;
+	const total = BASES.reduce((sum, base) => sum + (composition[base] ?? 0), 0);
+	if (total === 0) return undefined;
+	return Number((((composition.A ?? 0) + (composition.T ?? 0)) / total * 100).toFixed(1));
 };

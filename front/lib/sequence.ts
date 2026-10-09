@@ -31,8 +31,13 @@ export const ALLOWED_EXTENSIONS = [
 	".pdf",
 ] as const;
 
-export const MAX_DIRECT_UPLOAD_BYTES = 100 * 1024 * 1024;
-export const MAX_PROXY_UPLOAD_BYTES = 5 * 1024 * 1024;
+/**
+ * Uploads go through the API, which relays the bytes to object storage. Storage
+ * is bound to loopback on the API host and its presigned URLs embed that host,
+ * so the browser cannot reach it directly. Mirrors
+ * `MAX_BACKEND_UPLOAD_BYTES` in `back/src/lib/storage.ts`.
+ */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
 export const hasAllowedExtension = (filename: string) => {
 	const dot = filename.lastIndexOf(".");

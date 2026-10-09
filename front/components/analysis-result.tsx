@@ -1,9 +1,22 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import type { ReactNode } from "react";
 
-import { deriveGcContent, parseResult, type AnalysisResult, type Translation } from "../lib/result";
+import {
+	deriveAtContent,
+	deriveGcContent,
+	parseResult,
+	type AnalysisResult,
+	type Fasta,
+	type SequenceFeatures,
+	type SequenceStatistics,
+	type SequenceTypeInfo,
+	type Translation,
+	type Validation,
+} from "../lib/result";
 import { Empty, Panel, cx, formatDate } from "./primitives";
+import { InsightMarkdown } from "./insight-markdown";
 
 /**
  * Recharts measures the DOM, so it cannot be prerendered. `ssr: false` is only
@@ -44,7 +57,8 @@ export function AnalysisResultView({
 	createdAt: string;
 }) {
 	const result = parseResult(resultJson);
-	const derived = deriveGcContent(result.composition);
+	const derivedGc = deriveGcContent(result.composition);
+	const derivedAt = deriveAtContent(result.composition);
 	const hasKnown = !result.empty;
 
 	return (
@@ -54,16 +68,22 @@ export function AnalysisResultView({
 					title="AI interpretation"
 					description="A reasoning layer over the figures below. The numbers come from the analysis tool, not the model."
 				>
-					<p className="whitespace-pre-line text-xs leading-relaxed text-forest dark:text-night-text">
-						{result.insight}
-					</p>
+					<InsightMarkdown text={result.insight} />
 				</Panel>
 			) : null}
 
 			{result.record ? <RecordCard record={result.record} /> : null}
 
-			{result.gcContent !== undefined || derived !== undefined ? (
-				<GcCard reported={result.gcContent} derived={derived} />
+			{result.sequenceType ? <SequenceTypeCard type={result.sequenceType} /> : null}
+
+			{analysisType === "at_content" && derivedAt !== undefined ? (
+				<PercentCard label="AT content" value={derivedAt} reported={false} />
+			) : result.gcContent !== undefined || derivedGc !== undefined ? (
+				<PercentCard
+					label="GC content"
+					value={result.gcContent ?? derivedGc ?? 0}
+					reported={result.gcContent !== undefined}
+				/>
 			) : null}
 
 			{result.composition ? (
@@ -71,6 +91,16 @@ export function AnalysisResultView({
 					<CompositionChart composition={result.composition} />
 				</Panel>
 			) : null}
+
+			{result.sequenceStatistics ? (
+				<SequenceStatisticsCard stats={result.sequenceStatistics} />
+			) : null}
+
+			{result.sequenceFeatures ? (
+				<SequenceFeaturesCard features={result.sequenceFeatures} />
+			) : null}
+
+			{result.validation ? <ValidationCard validation={result.validation} /> : null}
 
 			{result.translation ? (
 				<TranslationCard translation={result.translation} />
@@ -93,6 +123,8 @@ export function AnalysisResultView({
 					<HitTable rows={result.blastHits} />
 				</Panel>
 			) : null}
+
+			{result.fasta ? <FastaCard fasta={result.fasta} /> : null}
 
 			{Object.keys(result.extra).length > 0 ? (
 				<details className="rounded-lg border border-line dark:border-night-line">
@@ -178,24 +210,29 @@ function TranslationCard({ translation }: { translation: Translation }) {
 }
 
 /**
- * GC content, with a plain meter -- no chart library needed for one number.
+ * A single percentage, with a plain meter -- no chart library needed for one
+ * number. Used for GC and AT content.
  *
- * When the payload omits `gc_content` but carries a composition, the figure is
- * derived here. It is labelled as derived, because a number the client computed
- * must not be presented as one the tool reported.
+ * When the payload omits the figure but carries a composition, it is derived
+ * here and labelled as derived: a number the client computed must not be
+ * presented as one the tool reported.
  */
-function GcCard({ reported, derived }: { reported?: number; derived?: number }) {
-	const value = reported ?? derived;
-	const isDerived = reported === undefined && derived !== undefined;
-	if (value === undefined) return null;
-
+function PercentCard({
+	label,
+	value,
+	reported,
+}: {
+	label: string;
+	value: number;
+	reported: boolean;
+}) {
 	// 0-100 on a bar, clamped because a bad payload should not invert the meter.
 	const width = Math.min(100, Math.max(0, value));
 
 	return (
 		<div className="rounded-lg border border-line p-3 dark:border-night-line">
 			<div className="flex items-baseline justify-between">
-				<p className="text-xs font-semibold text-forest dark:text-night-text">GC content</p>
+				<p className="text-xs font-semibold text-forest dark:text-night-text">{label}</p>
 				<p className="font-mono text-lg font-semibold text-forest dark:text-night-text">
 					{value.toFixed(1)}%
 				</p>
@@ -207,11 +244,197 @@ function GcCard({ reported, derived }: { reported?: number; derived?: number }) 
 				/>
 			</div>
 			<p className="mt-1.5 text-[11px] text-muted">
-				{isDerived
-					? "Derived from the base counts; the tool did not report this figure."
-					: "Reported by the analysis tool."}
+				{reported
+					? "Reported by the analysis tool."
+					: "Derived from the base counts; the tool did not report this figure."}
 			</p>
 		</div>
+	);
+}
+
+function StatRow({ label, children }: { label: string; children: ReactNode }) {
+	return (
+		<div className="flex items-baseline justify-between gap-3 border-t border-line py-1 first:border-t-0 dark:border-night-line">
+			<span className="text-xs text-muted dark:text-night-muted">{label}</span>
+			<span className="text-right font-mono text-xs text-forest dark:text-night-text">{children}</span>
+		</div>
+	);
+}
+
+/** A boolean rendered as a small badge. `undefined` means "not reported". */
+function Flag({ label, value }: { label: string; value?: boolean }) {
+	if (value === undefined) return null;
+	return (
+		<span
+			className={cx(
+				"rounded-full px-2 py-0.5 text-[11px] font-medium",
+				value
+					? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+					: "bg-line text-muted dark:bg-night-raised dark:text-night-muted",
+			)}
+		>
+			{label}
+		</span>
+	);
+}
+
+function SequenceStatisticsCard({ stats }: { stats: SequenceStatistics }) {
+	return (
+		<Panel title="Sequence statistics" description="Descriptive figures from the statistics tool.">
+			<div className="flex flex-col">
+				{stats.length !== undefined ? (
+					<StatRow label="Length">{stats.length.toLocaleString()}</StatRow>
+				) : null}
+				{stats.uniqueBases !== undefined ? (
+					<StatRow label="Unique bases">{stats.uniqueBases}</StatRow>
+				) : null}
+				{stats.mostFrequentBase ? (
+					<StatRow label="Most frequent base">{stats.mostFrequentBase}</StatRow>
+				) : null}
+				{stats.leastFrequentBase ? (
+					<StatRow label="Least frequent base">{stats.leastFrequentBase}</StatRow>
+				) : null}
+				{stats.ambiguousBaseCount !== undefined ? (
+					<StatRow label="Ambiguous bases">
+						{stats.ambiguousBaseCount.toLocaleString()}
+					</StatRow>
+				) : null}
+			</div>
+		</Panel>
+	);
+}
+
+function SequenceTypeCard({ type }: { type: SequenceTypeInfo }) {
+	return (
+		<Panel
+			title="Sequence type"
+			description={type.reasoning ?? "Detected from the sequence characters."}
+		>
+			<div className="flex flex-wrap items-baseline gap-2">
+				<span className="font-mono text-sm font-semibold text-forest dark:text-night-text">
+					{type.sequenceType ?? "Unknown"}
+				</span>
+				{type.confidence ? (
+					<span className="text-xs text-muted">confidence {type.confidence}</span>
+				) : null}
+			</div>
+			<div className="mt-2 flex flex-wrap gap-1.5">
+				<Flag label="DNA characters" value={type.hasDnaChars} />
+				<Flag label="RNA characters" value={type.hasRnaChars} />
+				<Flag label="protein-only characters" value={type.hasProteinOnlyChars} />
+			</div>
+		</Panel>
+	);
+}
+
+function SequenceFeaturesCard({ features }: { features: SequenceFeatures }) {
+	return (
+		<Panel
+			title="Sequence features"
+			description={features.summary ?? "Combined summary from the feature extractor."}
+		>
+			<div className="flex flex-col">
+				{features.length !== undefined ? (
+					<StatRow label="Length">{features.length.toLocaleString()}</StatRow>
+				) : null}
+				{features.sequenceType ? (
+					<StatRow label="Type">
+						{features.sequenceType}
+						{features.typeConfidence ? ` (${features.typeConfidence})` : ""}
+					</StatRow>
+				) : null}
+				{features.gcContentPercent !== undefined ? (
+					<StatRow label="GC content">{features.gcContentPercent.toFixed(1)}%</StatRow>
+				) : null}
+				{features.isValid !== undefined ? (
+					<StatRow label="Valid">{features.isValid ? "Yes" : "No"}</StatRow>
+				) : null}
+				{features.mostFrequentBase ? (
+					<StatRow label="Most frequent base">{features.mostFrequentBase}</StatRow>
+				) : null}
+				{features.ambiguousBaseCount !== undefined ? (
+					<StatRow label="Ambiguous bases">
+						{features.ambiguousBaseCount.toLocaleString()}
+					</StatRow>
+				) : null}
+				{features.invalidCharacters && features.invalidCharacters.length > 0 ? (
+					<StatRow label="Invalid characters">
+						{features.invalidCharacters.join(", ")}
+					</StatRow>
+				) : null}
+			</div>
+		</Panel>
+	);
+}
+
+function ValidationCard({ validation }: { validation: Validation }) {
+	const valid = validation.isValid;
+
+	return (
+		<Panel title="Validation" description={validation.message ?? "IUPAC validity checks."}>
+			<div className="flex flex-wrap items-baseline gap-2">
+				<span
+					className={cx(
+						"text-sm font-semibold",
+						valid === false
+							? "text-amber-600 dark:text-amber-400"
+							: "text-forest dark:text-night-text",
+					)}
+				>
+					{valid === undefined ? "—" : valid ? "Valid" : "Invalid"}
+				</span>
+				{validation.sequenceLength !== undefined ? (
+					<span className="text-xs text-muted">
+						{validation.sequenceLength.toLocaleString()} residues
+					</span>
+				) : null}
+			</div>
+			<div className="mt-2 flex flex-wrap gap-1.5">
+				<Flag label="IUPAC DNA" value={validation.iupacDnaValid} />
+				<Flag label="IUPAC RNA" value={validation.iupacRnaValid} />
+				<Flag label="IUPAC protein" value={validation.iupacProteinValid} />
+			</div>
+			{validation.invalidCharacters && validation.invalidCharacters.length > 0 ? (
+				<p className="mt-2 text-[11px] text-muted">
+					Invalid characters: {validation.invalidCharacters.join(", ")}
+				</p>
+			) : null}
+		</Panel>
+	);
+}
+
+function FastaCard({ fasta }: { fasta: Fasta }) {
+	const total = fasta.totalRecords ?? fasta.records.length;
+
+	return (
+		<Panel
+			title="FASTA records"
+			description={`${total.toLocaleString()} record${total === 1 ? "" : "s"} parsed.`}
+		>
+			<div className="overflow-x-auto">
+				<table className="w-full text-left text-xs">
+					<thead className="text-muted">
+						<tr>
+							<th className="py-1 pr-3 font-medium">ID</th>
+							<th className="py-1 pr-3 font-medium">Length</th>
+							<th className="py-1 font-medium">Description</th>
+						</tr>
+					</thead>
+					<tbody className="font-mono text-forest dark:text-night-text">
+						{fasta.records.map((record, index) => (
+							<tr
+								key={record.id ?? index}
+								className="border-t border-line dark:border-night-line"
+							>
+								<td className="py-1 pr-3">{record.id ?? "—"}</td>
+								<td className="py-1 pr-3">{record.length?.toLocaleString() ?? "—"}</td>
+								<td className="py-1 text-muted">{record.description ?? "—"}</td>
+							</tr>
+						))}
+					</tbody>
+				</table>
+			</div>
+		</Panel>
 	);
 }
 

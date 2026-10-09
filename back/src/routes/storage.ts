@@ -19,6 +19,7 @@ import {
 	buildObjectKey,
 	deleteObject,
 	formatFromFilename,
+	getObjectStream,
 	presignGet,
 	presignPut,
 	putObject,
@@ -134,6 +135,15 @@ export const storageRoutes = new Elysia()
 			await assertProjectOwner(projectId, principal);
 			assertAllowedFilename(filename);
 
+			// Optional, and previously dropped on this path: the direct-to-storage
+			// flow carried a description but the proxy did not, so an upload that
+			// went through the API silently lost it.
+			const rawDescription = form.get("description");
+			const description =
+				typeof rawDescription === "string" && rawDescription.trim().length > 0
+					? rawDescription.trim().slice(0, 2000)
+					: null;
+
 			const file = form.get("file");
 			if (!(file instanceof File)) {
 				throw new ApiError(422, "VALIDATION_ERROR", 'Field "file" is required.');
@@ -154,7 +164,7 @@ export const storageRoutes = new Elysia()
 				.insert(sequences)
 				.values({
 					projectId,
-					description: null,
+					description,
 					format: formatFromFilename(filename),
 					objectKey,
 					originalFilename: filename,
@@ -171,6 +181,28 @@ export const storageRoutes = new Elysia()
 			});
 		},
 	)
+	.get("/storage/download/*", async ({ request, params }) => {
+		const principal = await requirePrincipal(request);
+		const objectKey = params["*"];
+		await findOwnedSequenceByObjectKey(objectKey, principal);
+
+		// Relayed server-side. The response is a stream, not the JSON envelope
+		// the rest of the API uses, because the client here is the browser's
+		// download handler rather than `apiFetch`.
+		const object = await getObjectStream(objectKey);
+
+		const headers = new Headers({
+			"content-type": object.contentType,
+			"content-disposition": `attachment; filename="${encodeURIComponent(
+				objectKey.split("/").pop() ?? "download",
+			)}"`,
+		});
+		if (object.contentLength !== undefined) {
+			headers.set("content-length", String(object.contentLength));
+		}
+
+		return new Response(object.body, { headers });
+	})
 	.get("/storage/*", async ({ request, params }) => {
 		const principal = await requirePrincipal(request);
 		const objectKey = params["*"];

@@ -2,8 +2,8 @@
 
 import { useState } from "react";
 
-import { describeError, isQueueUnavailable } from "../lib/api";
-import { deleteObject, getObjectDownload, queueAnalysis, type Sequence } from "../lib/genomics";
+import { API_URL, describeError, isQueueUnavailable } from "../lib/api";
+import { deleteSequence, queueAnalysis, type Sequence } from "../lib/genomics";
 import { Button, Empty, Notice, Panel, formatDate, cx } from "./primitives";
 
 /** `analysisType` is dispatched to the Bio service, whose `available_tools` these
@@ -103,28 +103,24 @@ function SequenceRow({
 		}
 	};
 
-	const download = async () => {
+	const download = () => {
 		if (!sequence.objectKey) return;
-		setError(null);
-		setBusy(true);
-		try {
-			// The URL is presigned and short-lived, so it is fetched on demand
-			// rather than stored on the row.
-			const { downloadUrl } = await getObjectDownload(sequence.objectKey);
-			window.open(downloadUrl, "_blank", "noopener,noreferrer");
-		} catch (caught) {
-			setError(describeError(caught));
-		} finally {
-			setBusy(false);
-		}
+		// Streamed through the API, which relays from object storage. A presigned
+		// URL would embed the storage host, which the browser cannot reach.
+		window.open(
+			`${API_URL}/storage/download/${sequence.objectKey}`,
+			"_blank",
+			"noopener,noreferrer",
+		);
 	};
 
 	const remove = async () => {
-		if (!sequence.objectKey) return;
 		setError(null);
 		setBusy(true);
 		try {
-			await deleteObject(sequence.objectKey);
+			// Removes the row (and its stored object) server-side. There is no
+			// confirm dialog on purpose: re-uploading is cheap.
+			await deleteSequence(sequence.projectId, sequence.id);
 			await onSequencesChanged();
 		} catch (caught) {
 			setError(describeError(caught));
@@ -156,15 +152,13 @@ function SequenceRow({
 
 				<div className="flex flex-wrap items-center gap-1.5">
 					{sequence.objectKey ? (
-						<>
-							<Button onClick={download} disabled={busy}>
-								Download
-							</Button>
-							<Button variant="accent" onClick={remove} disabled={busy}>
-								Delete
-							</Button>
-						</>
+						<Button onClick={download} disabled={busy}>
+							Download
+						</Button>
 					) : null}
+					<Button variant="accent" onClick={remove} disabled={busy}>
+						Delete
+					</Button>
 				</div>
 			</div>
 
