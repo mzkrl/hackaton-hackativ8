@@ -9,7 +9,7 @@
  * lands with a different shape, this is what tells us.
  */
 
-import { deriveGcContent, parseResult } from "../lib/result";
+import { deriveAtContent, deriveGcContent, parseResult } from "../lib/result";
 
 /** The response exactly as written in the plan, section 4.11. */
 const documented = {
@@ -54,6 +54,66 @@ const translated = {
 		contains_stop_codon: false,
 	},
 };
+
+/** The normalised shapes the backend writes for the newer Bio tools. */
+const sequenceStatistics = {
+	sequence_statistics: {
+		length: 5242,
+		base_counts: { A: 1316, T: 1540, G: 1288, C: 1098 },
+		unique_bases: 4,
+		most_frequent_base: "T",
+		least_frequent_base: "C",
+		ambiguous_base_count: 0,
+	},
+};
+
+const sequenceType = {
+	sequence_type: {
+		sequence_type: "DNA",
+		confidence: "high",
+		reasoning: "Thymine (T) present without Uracil (U) - characteristic of DNA.",
+		has_dna_chars: true,
+		has_rna_chars: false,
+		has_protein_only_chars: false,
+	},
+};
+
+const sequenceFeatures = {
+	sequence_features: {
+		summary: "Type: DNA (high confidence). Length: 5242 residues.",
+		length: 5242,
+		is_valid: true,
+		sequence_type: "DNA",
+		type_confidence: "high",
+		gc_content_percent: 45.517,
+		base_counts: { A: 1316, T: 1540, G: 1288, C: 1098 },
+		most_frequent_base: "T",
+		ambiguous_base_count: 0,
+		invalid_characters: [],
+	},
+};
+
+const validation = {
+	validation: {
+		is_valid: true,
+		iupac_dna_valid: true,
+		iupac_rna_valid: false,
+		iupac_protein_valid: true,
+		sequence_length: 5242,
+		invalid_characters: [],
+		message: "Sequence contains only valid IUPAC characters.",
+	},
+};
+
+const fasta = {
+	fasta: {
+		total_records: 1,
+		records: [{ id: "sequence_1", length: 5242, description: "sequence_1 raw input" }],
+	},
+};
+
+/** `source` is provenance, not data: it must not surface under "Other fields". */
+const withSource = { source: "langflow", gc_content: 45.5 };
 
 let failures = 0;
 
@@ -107,6 +167,58 @@ check("translation stop codon", translation.translation?.containsStopCodon, fals
 check("translation note", translation.translation?.note?.startsWith("Input length"), true);
 check("translation payload leaves nothing over", translation.extra, {});
 check("translation payload is understood", translation.empty, false);
+
+const stats = parseResult(sequenceStatistics);
+check("statistics length", stats.sequenceStatistics?.length, 5242);
+check("statistics base count", stats.sequenceStatistics?.baseCounts?.T, 1540);
+check("statistics payload leaves nothing over", stats.extra, {});
+check("statistics payload is understood", stats.empty, false);
+
+const type = parseResult(sequenceType);
+check("sequence type", type.sequenceType?.sequenceType, "DNA");
+check("sequence type confidence", type.sequenceType?.confidence, "high");
+check("sequence type flags", type.sequenceType?.hasRnaChars, false);
+check("sequence type payload leaves nothing over", type.extra, {});
+
+const features = parseResult(sequenceFeatures);
+check("features gc", features.sequenceFeatures?.gcContentPercent, 45.517);
+check("features invalid characters", features.sequenceFeatures?.invalidCharacters, []);
+check("features payload leaves nothing over", features.extra, {});
+
+const val = parseResult(validation);
+check("validation dna flag", val.validation?.iupacDnaValid, true);
+check("validation message", val.validation?.message, "Sequence contains only valid IUPAC characters.");
+check("validation payload leaves nothing over", val.extra, {});
+
+const fastaResult = parseResult(fasta);
+check("fasta total", fastaResult.fasta?.totalRecords, 1);
+check("fasta record length", fastaResult.fasta?.records[0]?.length, 5242);
+check("fasta payload leaves nothing over", fastaResult.extra, {});
+
+const sourced = parseResult(withSource);
+check("source is claimed, not shown as data", sourced.extra, {});
+check("source payload is understood", sourced.empty, false);
+
+/**
+ * Rows written before the flattening keep the raw tool blob under its service
+ * name; the readers must still understand them.
+ */
+const legacyRawTools = {
+	source: "bio_service",
+	detect_sequence_type: { sequence_type: "DNA", confidence: "high", has_dna_chars: true },
+	validate_sequence: { is_valid: true, iupac_dna_valid: true, sequence_length: 12 },
+	parse_fasta: { total_records: 1, records: [{ id: "s1", length: 12, sequence: "ACGTACGTACGT" }] },
+};
+const legacy = parseResult(legacyRawTools);
+check("legacy sequence type", legacy.sequenceType?.sequenceType, "DNA");
+check("legacy validation", legacy.validation?.iupacDnaValid, true);
+check("legacy fasta length", legacy.fasta?.records[0]?.length, 12);
+check("legacy raw tool blobs do not leak into extra", legacy.extra, {});
+
+check("AT derived from composition", deriveAtContent({ A: 2, T: 2, G: 1, C: 1 }), 66.7);
+check("AT not derivable without composition", deriveAtContent(null), undefined);
+check("AT not derivable from an all-zero composition", deriveAtContent({ A: 0, T: 0, G: 0, C: 0 }), undefined);
+
 
 const unknown = parseResult(onlyUnknownKeys);
 check("unknown keys are kept, not dropped", unknown.extra, { foo: 1, bar: "two" });

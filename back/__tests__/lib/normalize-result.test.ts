@@ -163,4 +163,139 @@ describe("normalizeAnalysisOutcome", () => {
 
 		expect(out).toEqual({ source: "bio_service", weird: true });
 	});
+
+	test("flattens the statistics, type, features and validation tools", () => {
+		const out = normalizeAnalysisOutcome({
+			source: "bio_service",
+			results: {
+				sequence_statistics: {
+					length: 5242,
+					base_counts: { A: 1316, C: 1098, G: 1288, T: 1540 },
+					unique_bases: 4,
+					most_frequent_base: "T",
+					least_frequent_base: "C",
+					ambiguous_base_count: 0,
+				},
+				detect_sequence_type: {
+					reasoning: "Thymine (T) present without Uracil (U) - characteristic of DNA.",
+					confidence: "high",
+					has_dna_chars: true,
+					has_rna_chars: false,
+					sequence_type: "DNA",
+					has_protein_only_chars: false,
+				},
+				extract_sequence_features: {
+					length: 5242,
+					summary: "Type: DNA (high confidence). Length: 5242 residues.",
+					is_valid: true,
+					base_counts: { A: 1316, C: 1098, G: 1288, T: 1540 },
+					sequence_type: "DNA",
+					type_confidence: "high",
+					gc_content_percent: 45.517,
+					invalid_characters: [],
+					most_frequent_base: "T",
+					ambiguous_base_count: 0,
+				},
+				validate_sequence: {
+					is_valid: true,
+					iupac_dna_valid: true,
+					iupac_rna_valid: false,
+					sequence_length: 5242,
+					invalid_characters: [],
+					validation_message: "Sequence contains only valid IUPAC characters.",
+					iupac_protein_valid: true,
+				},
+			},
+		});
+
+		expect(out.sequence_statistics).toEqual({
+			length: 5242,
+			base_counts: { A: 1316, T: 1540, G: 1288, C: 1098 },
+			unique_bases: 4,
+			most_frequent_base: "T",
+			least_frequent_base: "C",
+			ambiguous_base_count: 0,
+		});
+		expect(out.sequence_type).toEqual({
+			sequence_type: "DNA",
+			confidence: "high",
+			reasoning: "Thymine (T) present without Uracil (U) - characteristic of DNA.",
+			has_dna_chars: true,
+			has_rna_chars: false,
+			has_protein_only_chars: false,
+		});
+		expect(out.sequence_features).toEqual({
+			summary: "Type: DNA (high confidence). Length: 5242 residues.",
+			length: 5242,
+			is_valid: true,
+			sequence_type: "DNA",
+			type_confidence: "high",
+			gc_content_percent: 45.517,
+			base_counts: { A: 1316, T: 1540, G: 1288, C: 1098 },
+			most_frequent_base: "T",
+			ambiguous_base_count: 0,
+			invalid_characters: [],
+		});
+		expect(out.validation).toEqual({
+			is_valid: true,
+			iupac_dna_valid: true,
+			iupac_rna_valid: false,
+			iupac_protein_valid: true,
+			sequence_length: 5242,
+			invalid_characters: [],
+			message: "Sequence contains only valid IUPAC characters.",
+		});
+
+		// GC% and length are also lifted into the shared fields.
+		expect(out.gc_content).toBe(45.517);
+		expect(out.record).toEqual({ length: 5242 });
+
+		// ... and none of the flattened tools survive as opaque blobs.
+		expect(out.sequence_statistics).toBeDefined();
+		expect(out.detect_sequence_type).toBeUndefined();
+		expect(out.extract_sequence_features).toBeUndefined();
+		expect(out.validate_sequence).toBeUndefined();
+	});
+
+	test("falls back to statistics base counts for the composition chart", () => {
+		const out = normalizeAnalysisOutcome({
+			source: "bio_service",
+			results: {
+				sequence_statistics: { length: 10, base_counts: { A: 1, T: 2, G: 3, C: 4 } },
+			},
+		});
+
+		expect(out.composition).toEqual({ A: 1, T: 2, G: 3, C: 4 });
+	});
+
+	test("strips the residue text out of parse_fasta records", () => {
+		const out = normalizeAnalysisOutcome({
+			source: "bio_service",
+			results: {
+				parse_fasta: {
+					records: [
+						{
+							id: "sequence_1",
+							length: 12,
+							sequence: "ACGTACGTACGT",
+							description: "sequence_1 raw input",
+						},
+						{ id: "sequence_2", sequence: "ACGT", description: "raw input" },
+					],
+					total_records: 2,
+				},
+			},
+		});
+
+		expect(out.fasta).toEqual({
+			total_records: 2,
+			records: [
+				{ id: "sequence_1", length: 12, description: "sequence_1 raw input" },
+				{ id: "sequence_2", length: 4, description: "raw input" },
+			],
+		});
+		expect(out.parse_fasta).toBeUndefined();
+		// The residue text must not survive into the stored payload.
+		expect(JSON.stringify(out)).not.toContain("ACGTACGTACGT");
+	});
 });
