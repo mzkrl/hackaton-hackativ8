@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 import { API_URL, describeError, isQueueUnavailable } from "../lib/api";
-import { deleteObject, queueAnalysis, type Sequence } from "../lib/genomics";
+import { deleteSequence, queueAnalysis, type Sequence } from "../lib/genomics";
 import { Button, Empty, Notice, Panel, formatDate, cx } from "./primitives";
 
 /** `analysisType` is dispatched to the Bio service, whose `available_tools` these
@@ -115,11 +115,12 @@ function SequenceRow({
 	};
 
 	const remove = async () => {
-		if (!sequence.objectKey) return;
 		setError(null);
 		setBusy(true);
 		try {
-			await deleteObject(sequence.objectKey);
+			// Removes the row (and its stored object) server-side. There is no
+			// confirm dialog on purpose: re-uploading is cheap.
+			await deleteSequence(sequence.projectId, sequence.id);
 			await onSequencesChanged();
 		} catch (caught) {
 			setError(describeError(caught));
@@ -151,15 +152,13 @@ function SequenceRow({
 
 				<div className="flex flex-wrap items-center gap-1.5">
 					{sequence.objectKey ? (
-						<>
-							<Button onClick={download} disabled={busy}>
-								Download
-							</Button>
-							<Button variant="accent" onClick={remove} disabled={busy}>
-								Delete
-							</Button>
-						</>
+						<Button onClick={download} disabled={busy}>
+							Download
+						</Button>
 					) : null}
+					<Button variant="accent" onClick={remove} disabled={busy}>
+						Delete
+					</Button>
 				</div>
 			</div>
 

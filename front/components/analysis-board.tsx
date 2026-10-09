@@ -110,7 +110,7 @@ function AnalysisRow({
 	};
 
 	const remove = async () => {
-		if (!window.confirm("Delete this analysis? This cannot be undone.")) return;
+		// No confirm dialog: a failed or unwanted analysis is one click to re-run.
 		setError(null);
 		setBusy(true);
 		try {

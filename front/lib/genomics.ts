@@ -185,6 +185,13 @@ export const createProject = (name: string) =>
 export const listSequences = (projectId: string) =>
 	apiFetch<Sequence[]>(`/projects/${projectId}/sequences`);
 
+/** Removes a sequence and its stored object (if any), cascading its analyses. */
+export const deleteSequence = (projectId: string, sequenceId: string) =>
+	apiFetch<{ id: string; deleted: boolean }>(
+		`/projects/${projectId}/sequences/${sequenceId}`,
+		{ method: "DELETE" },
+	);
+
 /**
  * Registers a sequence that has no file behind it — a pasted string.
  *

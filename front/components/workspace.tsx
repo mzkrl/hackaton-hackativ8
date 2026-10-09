@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { describeError, isApiConfigured, isUnauthorized } from "../lib/api";
+import { ApiRequestError, describeError, isApiConfigured, isUnauthorized } from "../lib/api";
 import {
 	claimGuest,
 	clearGuestToken,
@@ -209,36 +209,41 @@ function useDashboardData() {
 			return;
 		}
 
-		const rows = await Promise.all(
-			trackedIds.map(async (id) => {
-				const progress = await getAnalysisStatus(id);
-				return progress.status === "queued" || progress.status === "processing"
-					? null
-					: await getAnalysis(id);
+		const loaded = await Promise.all(
+			trackedIds.map(async (id): Promise<Analysis | null> => {
+				try {
+					const progress = await getAnalysisStatus(id);
+
+					// Still in flight: there is no full row yet, so render the
+					// progress view and let the next poll replace it.
+					if (progress.status === "queued" || progress.status === "processing") {
+						return {
+							id: progress.id,
+							sequenceId: "",
+							analysisType: "",
+							status: progress.status,
+							queueJobId: progress.queueJobId,
+							resultJson: null,
+							errorMessage: progress.errorMessage,
+							createdAt: progress.updatedAt,
+							updatedAt: progress.updatedAt,
+						};
+					}
+
+					return await getAnalysis(id);
+				} catch (error) {
+					// A 404 means the analysis (or the sequence it belonged to) was
+					// deleted. That is not a board failure: drop the row rather than
+					// rejecting the whole refresh.
+					if (error instanceof ApiRequestError && error.status === 404) {
+						return null;
+					}
+					throw error;
+				}
 			}),
 		);
 
-		const settled = rows.filter((row): row is Analysis => row !== null);
-		const pending = await Promise.all(
-			trackedIds
-				.filter((id) => !settled.some((row) => row.id === id))
-				.map((id) => getAnalysisStatus(id)),
-		);
-
-		setAnalyses([
-			...settled,
-			...pending.map<Analysis>((progress) => ({
-				id: progress.id,
-				sequenceId: "",
-				analysisType: "",
-				status: progress.status,
-				queueJobId: progress.queueJobId,
-				resultJson: null,
-				errorMessage: progress.errorMessage,
-				createdAt: progress.updatedAt,
-				updatedAt: progress.updatedAt,
-			})),
-		]);
+		setAnalyses(loaded.filter((row): row is Analysis => row !== null));
 	}, [trackedIds]);
 
 	/**
