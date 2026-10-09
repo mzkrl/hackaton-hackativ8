@@ -11,7 +11,7 @@ import { ApiError } from "./api-error";
 
 export const PRESIGN_TTL_SECONDS = 900;
 
-export const MAX_BACKEND_UPLOAD_BYTES = 5 * 1024 * 1024;
+export const MAX_BACKEND_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const MAX_OBJECT_BYTES = 100 * 1024 * 1024;
 
 const ALLOWED_EXTENSIONS = new Set([
@@ -210,4 +210,38 @@ export const getObjectText = async (key: string): Promise<string> => {
 	}
 
 	return result.Body.transformToString("utf-8");
+};
+
+/**
+ * Streams an object out of storage as a web stream, for the API to relay to the
+ * browser.
+ *
+ * The alternative, a presigned GET, embeds the storage endpoint's hostname in
+ * the URL. That only works when the browser can reach that host directly, which
+ * it cannot here: object storage is bound to loopback on the API host, and the
+ * signature covers the `host` header, so the URL cannot be rewritten to point at
+ * the API. Relaying the bytes keeps storage internal and the credentials on the
+ * server.
+ */
+export const getObjectStream = async (key: string) => {
+	const { client, bucket } = getStorage();
+	const result = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+
+	if (!result.Body) {
+		throw new ApiError(404, "OBJECT_NOT_FOUND", "Stored object has no body.");
+	}
+
+	if (result.ContentLength !== undefined && result.ContentLength > MAX_OBJECT_BYTES) {
+		throw new ApiError(
+			413,
+			"FILE_TOO_LARGE",
+			`Stored object exceeds the ${MAX_OBJECT_BYTES} byte limit.`,
+		);
+	}
+
+	return {
+		body: result.Body.transformToWebStream(),
+		contentType: result.ContentType ?? "application/octet-stream",
+		contentLength: result.ContentLength,
+	};
 };

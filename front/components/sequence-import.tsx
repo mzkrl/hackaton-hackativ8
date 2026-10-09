@@ -3,11 +3,10 @@
 import { useMemo, useState } from "react";
 
 import { describeError } from "../lib/api";
-import { createPastedSequence, presignUpload, proxyUpload } from "../lib/genomics";
+import { createPastedSequence, proxyUpload } from "../lib/genomics";
 import {
 	ALLOWED_EXTENSIONS,
-	MAX_DIRECT_UPLOAD_BYTES,
-	MAX_PROXY_UPLOAD_BYTES,
+	MAX_UPLOAD_BYTES,
 	formatBytes,
 	hasAllowedExtension,
 	hashSequence,
@@ -107,7 +106,7 @@ function FileImport({
 	const [description, setDescription] = useState("");
 	const [recordCount, setRecordCount] = useState<number | null>(null);
 
-	const tooLarge = file !== null && file.size > MAX_DIRECT_UPLOAD_BYTES;
+	const tooLarge = file !== null && file.size > MAX_UPLOAD_BYTES;
 	const badExtension = file !== null && !hasAllowedExtension(file.name);
 
 	const detectRecords = async (f: File) => {
@@ -124,42 +123,33 @@ function FileImport({
 		}
 	};
 
-	const presign = () =>
+	const upload = () =>
 		onRun(async () => {
 			if (!file) throw new Error("Choose a file first.");
-			if (tooLarge) throw new Error(`That file is ${formatBytes(file.size)}; the limit is 100 MB.`);
 			if (badExtension) throw new Error(`Allowed extensions: ${ALLOWED_EXTENSIONS.join(", ")}.`);
+			if (tooLarge) {
+				throw new Error(
+					`That file is ${formatBytes(file.size)}; the limit is ${formatBytes(MAX_UPLOAD_BYTES)}.`,
+				);
+			}
 
-			// For multi-record FASTA, read the file and create N sequence rows
+			const form = new FormData();
+			form.set("projectId", projectId);
+			form.set("filename", file.name);
+			form.set("file", file);
+			if (description.trim()) form.set("description", description.trim());
+
+			// Bytes go through the API, which relays them to object storage. The
+			// browser is never handed a storage URL, so storage stays internal.
+			await proxyUpload(form);
+
+			// Multi-record FASTA: the file is one object, but each record becomes
+			// its own sequence row. `proxyUpload` created the row for the first
+			// record; add the rest.
 			const isMultiRecordFasta = recordCount !== null && recordCount > 1;
 			if (isMultiRecordFasta) {
-				const text = await file.text();
-				const records = parseFastaRecords(text);
-
-				// Upload the file once, then create N sequence rows pointing to the same object
-				const grant = await presignUpload({
-					projectId,
-					filename: file.name,
-					contentType: file.type || "application/octet-stream",
-					sizeBytes: file.size,
-					description: description.trim() || null,
-				});
-
-				const put = await fetch(grant.uploadUrl, {
-					method: "PUT",
-					headers: { "content-type": file.type || "application/octet-stream" },
-					body: file,
-				});
-
-				if (!put.ok) {
-					throw new Error(
-						`Storage rejected the upload (${put.status}). The sequence row was created but the file is not attached.`,
-					);
-				}
-
-// Create additional sequence rows for records 2..N
-					// The first record's row was already created by presignUpload
-					await Promise.all(
+				const records = parseFastaRecords(await file.text());
+				await Promise.all(
 					records.slice(1).map((record) =>
 						createPastedSequence(projectId, {
 							format: "fasta",
@@ -170,60 +160,13 @@ function FileImport({
 						}),
 					),
 				);
-
-				setFile(null);
-				setDescription("");
-				setRecordCount(null);
-				return `Uploaded ${file.name} (${formatBytes(file.size)}) with ${records.length} records — created ${records.length} sequences.`;
 			}
 
-			const grant = await presignUpload({
-				projectId,
-				filename: file.name,
-				contentType: file.type || "application/octet-stream",
-				sizeBytes: file.size,
-				description: description.trim() || null,
-			});
-
-			// The presigned signature covers the Content-Type it was minted with,
-			// so the header has to match exactly or object storage rejects the PUT.
-			const put = await fetch(grant.uploadUrl, {
-				method: "PUT",
-				headers: { "content-type": file.type || "application/octet-stream" },
-				body: file,
-			});
-
-			if (!put.ok) {
-				throw new Error(
-					`Storage rejected the upload (${put.status}). The sequence row was created but the file is not attached.`,
-				);
-			}
-
+			const suffix = isMultiRecordFasta ? ` — created ${recordCount} sequences.` : ".";
 			setFile(null);
 			setDescription("");
 			setRecordCount(null);
-			return `Uploaded ${file.name} (${formatBytes(file.size)}).`;
-		});
-
-	const proxied = () =>
-		onRun(async () => {
-			if (!file) throw new Error("Choose a file first.");
-			if (file.size > MAX_PROXY_UPLOAD_BYTES) {
-				throw new Error(
-					`That file is ${formatBytes(file.size)}; the proxied path caps at ${formatBytes(
-						MAX_PROXY_UPLOAD_BYTES,
-					)}. Use direct upload instead.`,
-				);
-			}
-
-			const form = new FormData();
-			form.set("projectId", projectId);
-			form.set("filename", file.name);
-			form.set("file", file);
-
-			const result = await proxyUpload(form);
-			setFile(null);
-			return `Uploaded ${file.name} (${formatBytes(result.sizeBytes)}) through the API.`;
+			return `Uploaded ${file.name} (${formatBytes(file.size)})${suffix}`;
 		});
 
 	return (
@@ -241,9 +184,8 @@ function FileImport({
 				disabled={busy}
 				hint={
 					<span>
-						{ALLOWED_EXTENSIONS.join(", ")} · direct upload up to{" "}
-						{formatBytes(MAX_DIRECT_UPLOAD_BYTES)}, proxied up to{" "}
-						{formatBytes(MAX_PROXY_UPLOAD_BYTES)}
+						{ALLOWED_EXTENSIONS.join(", ")} · up to {formatBytes(MAX_UPLOAD_BYTES)} · sent through
+						the API
 					</span>
 				}
 			/>
@@ -265,11 +207,12 @@ function FileImport({
 			) : null}
 
 			<div className="flex flex-wrap gap-2">
-				<Button variant="primary" onClick={presign} disabled={busy || !file || tooLarge || badExtension}>
-					{busy ? "Uploading…" : "Upload direct to storage"}
-				</Button>
-				<Button onClick={proxied} disabled={busy || !file || badExtension || file.size > MAX_PROXY_UPLOAD_BYTES}>
-					Upload through API
+				<Button
+					variant="primary"
+					onClick={upload}
+					disabled={busy || !file || tooLarge || badExtension}
+				>
+					{busy ? "Uploading…" : "Upload"}
 				</Button>
 			</div>
 		</div>
