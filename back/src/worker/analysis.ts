@@ -62,7 +62,10 @@ const worker = new Worker<AnalysisJob>(
 				.limit(1);
 
 			if (analysis.length === 0) {
-				throw new Error(`Analysis ${analysisId} not found.`);
+				// The analysis was deleted while a re-check was scheduled. Nothing
+				// left to look at, so leave the queue quietly instead of failing a
+				// job for a row the user already removed.
+				return;
 			}
 
 			const status = analysis[0].status;

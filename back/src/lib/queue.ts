@@ -2,7 +2,16 @@ import type { ConnectionOptions, Queue as BullQueue } from "bullmq";
 
 import { ApiError } from "./api-error";
 
-export const ANALYSIS_QUEUE = "genomic-analysis";
+/**
+ * The BullMQ queue name, i.e. the Redis key prefix.
+ *
+ * Overridable so a local run can sit on its own queue while an older worker
+ * elsewhere shares the same Redis: BullMQ hands each job to the longest-waiting
+ * blocked worker, so a stale remote worker would otherwise win every job. Set
+ * `ANALYSIS_QUEUE_NAME` in `back/.env` for local isolation; production leaves it
+ * unset and gets the default.
+ */
+export const ANALYSIS_QUEUE = process.env.ANALYSIS_QUEUE_NAME?.trim() || "genomic-analysis";
 
 export type AnalysisJob = {
 	analysisId: string;
@@ -290,6 +299,33 @@ export const enqueueAnalysis = async (job: AnalysisJob) => {
 	} catch (error) {
 		await discardProducerQueue();
 		throw error;
+	}
+};
+
+/**
+ * Removes a queued analysis and any re-checks scheduled for it.
+ *
+ * Best-effort by design: a job the worker has already claimed is `active` and
+ * cannot be removed (its lock is held), and a remote worker reached over
+ * `QUEUE_ENQUEUE_URL` owns the queue. Deleting the row is what actually stops a
+ * run from mattering -- the worker's later write targets a row that is gone.
+ *
+ * Errors are swallowed: a delete must not fail just because Redis is down.
+ */
+export const discardAnalysisJob = async (analysisId: string) => {
+	if (process.env.QUEUE_ENQUEUE_URL?.trim()) return;
+
+	const jobIds = [analysisId];
+	for (let count = 1; count <= workerMaxRechecks(); count += 1) {
+		jobIds.push(`${analysisId}:recheck:${count}`);
+	}
+
+	try {
+		const queue = await getProducerQueue();
+		await Promise.all(jobIds.map((jobId) => queue.remove(jobId).catch(() => 0)));
+	} catch (error) {
+		await discardProducerQueue();
+		console.warn(`[queue] could not discard jobs for ${analysisId}:`, error);
 	}
 };
 

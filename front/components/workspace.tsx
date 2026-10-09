@@ -379,12 +379,41 @@ function useDashboardData() {
 		[],
 	);
 
+	const untrack = useCallback(
+		(projectId: string, analysisId: string) => {
+			setTracked((current) => {
+				const next = {
+					...current,
+					[projectId]: (current[projectId] ?? []).filter((id) => id !== analysisId),
+				};
+				writeTracked(next);
+				return next;
+			});
+		},
+		[],
+	);
+
 	const onAnalysisQueued = useCallback(
 		async (analysisId: string) => {
 			if (activeId) track(activeId, analysisId);
 			await refreshAnalyses();
 		},
 		[activeId, track, refreshAnalyses],
+	);
+
+	/**
+	 * Drops a deleted analysis from the tracked list.
+	 *
+	 * No refresh is issued here on purpose: `refreshAnalyses` closes over the
+	 * pre-delete id list, so calling it now would poll an id that no longer
+	 * exists and 404. The `refreshAnalyses` identity changes with `trackedIds`,
+	 * and the load effect re-runs against the list that no longer has the id.
+	 */
+	const onAnalysisDeleted = useCallback(
+		(analysisId: string) => {
+			if (activeId) untrack(activeId, analysisId);
+		},
+		[activeId, untrack],
 	);
 
 	const sequenceLabels = useMemo(() => {
@@ -414,6 +443,7 @@ function useDashboardData() {
 		reloadMessages,
 		track,
 		onAnalysisQueued,
+		onAnalysisDeleted,
 		activeId,
 		project,
 		sequenceLabels,
@@ -449,6 +479,7 @@ function DashboardContent({
 		reloadSequences,
 		reloadMessages,
 		onAnalysisQueued,
+		onAnalysisDeleted,
 		activeId,
 		project,
 		sequenceLabels,
@@ -560,7 +591,13 @@ function DashboardContent({
 							onQueueBlocked={setQueueBlock}
 						/>
 
-						<AnalysisBoard analyses={analyses} sequenceLabels={sequenceLabels} onRefresh={refresh} />
+						<AnalysisBoard
+							analyses={analyses}
+							sequenceLabels={sequenceLabels}
+							onRefresh={refresh}
+							onQueued={onAnalysisQueued}
+							onDeleted={onAnalysisDeleted}
+						/>
 
 						<NotesPanel projectId={project.id} messages={messages} onChanged={reloadMessages} />
 					</>

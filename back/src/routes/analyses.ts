@@ -8,9 +8,18 @@ import { assertAllowedAnalysisType } from "../lib/analysis-types";
 import { requirePrincipal } from "../lib/current-user";
 import { findOwnedAnalysis, findOwnedSequence } from "../lib/ownership";
 import { assertCanCreateAnalysis } from "../lib/quota";
-import { assertQueueConfigured, enqueueAnalysis, queueStatus } from "../lib/queue";
+import {
+	assertQueueConfigured,
+	discardAnalysisJob,
+	enqueueAnalysis,
+	queueStatus,
+} from "../lib/queue";
 import { enforce, RATE_LIMITS } from "../lib/rate-limit";
-import { readCachedStatus, writeCachedStatus } from "../lib/analysis-status-cache";
+import {
+	invalidateCachedStatuses,
+	readCachedStatus,
+	writeCachedStatus,
+} from "../lib/analysis-status-cache";
 
 const analysisParams = t.Object({ id: t.String({ format: "uuid" }) });
 
@@ -103,6 +112,27 @@ export const analysesRoutes = new Elysia()
 			const principal = await requirePrincipal(request);
 			const analysis = await findOwnedAnalysis(params.id, principal);
 			return { data: analysis };
+		},
+		{ params: analysisParams },
+	)
+	.delete(
+		"/analyses/:id",
+		async ({ request, params }) => {
+			const principal = await requirePrincipal(request);
+			const analysis = await findOwnedAnalysis(params.id, principal);
+
+			// Drop the queued work before the row so a job cannot start after the
+			// row is gone. A job already `active` cannot be removed, but its write
+			// then targets a deleted row and is a no-op.
+			await discardAnalysisJob(analysis.id);
+
+			await getDb().delete(analyses).where(eq(analyses.id, analysis.id));
+
+			// The cached status would otherwise keep serving a deleted row until
+			// its TTL lapses.
+			await invalidateCachedStatuses(principal.id, [analysis.id]);
+
+			return { data: { id: analysis.id, deleted: true } };
 		},
 		{ params: analysisParams },
 	)

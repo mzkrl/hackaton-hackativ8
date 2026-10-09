@@ -253,6 +253,11 @@ export const getAnalysis = (id: string) => apiFetch<Analysis>(`/analyses/${id}`)
 export const getAnalysisStatus = (id: string) =>
 	apiFetch<AnalysisProgress>(`/analyses/${id}/status`);
 
+export const deleteAnalysis = (id: string) =>
+	apiFetch<{ id: string; deleted: boolean }>(`/analyses/${id}`, {
+		method: "DELETE",
+	});
+
 /* -------------------------------------------------------- conversations --- */
 
 export const listConversations = (projectId: string) =>
