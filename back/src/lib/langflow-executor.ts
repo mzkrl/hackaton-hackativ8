@@ -7,18 +7,26 @@ import type { SequenceResolver } from "./sequence-content";
 export type AnalysisOutcome = Record<string, unknown>;
 
 /**
- * Runs an analysis through a Langflow flow over its webhook endpoint.
+ * Runs an analysis through a Langflow flow over its synchronous run endpoint.
  *
- * Langflow is synchronous: `POST /api/v1/webhook/{flow_id_or_name}` does not
- * return a job handle and cannot be polled. That is fine here because the
- * surrounding BullMQ job already provides the async boundary and the frontend
- * polls our own status endpoint.
+ * Langflow exposes two ways to trigger a flow and they are NOT equivalent:
  *
- * !! PROVISIONAL CONTRACT -------------------------------------------------
- * The request body below is a best guess and is NOT confirmed against the live
- * flow. It has to be updated once the flow owner states the actual input shape.
- * Keep it confined to `buildPayload` so there is one place to correct.
- * ------------------------------------------------------------------------
+ *   * `POST /api/v1/run/{flow_id}` executes the graph and returns the result
+ *     (`{ outputs, session_id }`) in the same response. That is what the worker
+ *     uses.
+ *   * `POST /api/v1/webhook/{flow_id}` is asynchronous by design: it starts the
+ *     flow in the background and answers `202 {"message": "Task started in the
+ *     background"}` with no output at all. A job that needs a result can only
+ *     ever read "no outputs" from it.
+ *
+ * The run endpoint injects `input_value` into the flow's Chat Input and applies
+ * `tweaks` to components by id or display name, which is how the analysis type
+ * reaches the Bio Analysis Connector without being concatenated into the
+ * sequence text.
+ *
+ * The surrounding BullMQ job already provides the async boundary and the
+ * frontend polls our own status endpoint, so a synchronous Langflow call is the
+ * right shape here.
  */
 
 const parseBaseUrl = (raw: string): string => {
@@ -33,59 +41,156 @@ const parseBaseUrl = (raw: string): string => {
 };
 
 /**
- * Collects every string that sits inside a content-bearing branch of the flow's
- * `outputs`.
+ * The connector component the `analysis_type` tweak addresses.
  *
- * Langflow nests its output as `outputs[componentId].outputs.message.text`, and
- * the exact depth varies by component and by flow. So the walk descends through
- * *every* key -- otherwise a component id sitting at the top level would block
- * the descent and the function would report "no text" for a flow that returned
- * text perfectly well.
- *
- * Only strings reached under a content-bearing key (`text`, `message`, `result`)
- * are collected. Structural keys are traversed but never collected, so adding or
- * reordering components cannot leak a node name into the analysis result.
+ * Langflow matches a tweak by component id or display name. The display name is
+ * used because it is stable across flow edits that only move nodes around, and
+ * it is overridable for the case where the flow owner renames the component.
  */
-const collectText = (
-	value: unknown,
-	into: string[] = [],
-	collect = false,
-	depth = 0,
-): string[] => {
-	// Depth is capped because this walks arbitrary decoded JSON. A hostile or
-	// simply unexpected payload should surface as "no text found", not as a
-	// stack overflow that takes the worker down.
-	if (value === null || value === undefined || depth > 16) return into;
+const connectorName = (): string =>
+	process.env.LANGFLOW_COMPONENT_NAME?.trim() || "Bio Analysis Connector";
 
-	if (typeof value === "string") {
-		if (collect) into.push(value);
-		return into;
-	}
+/**
+ * Builds the `/api/v1/run` body.
+ *
+ * The sequence is the flow's input (a Chat Input wired to the connector) and
+ * `analysis_type` is a per-request parameter on the connector. They travel
+ * separately so the sequence text is never interpreted as anything else.
+ */
+const buildRunRequest = (job: AnalysisJob, sequence: string): Record<string, unknown> => ({
+	input_value: sequence,
+	input_type: "chat",
+	output_type: "chat",
+	session_id: job.sequenceId,
+	tweaks: {
+		[connectorName()]: { analysis_type: job.analysisType },
+	},
+});
 
-	if (typeof value !== "object") return into;
+/**
+ * Collects the analysis text from a `/api/v1/run` response.
+ *
+ * The documented shape is
+ * `{ session_id, outputs: [ { outputs: [ { results: { message: { text } } } ] } ] }`
+ * -- one entry per terminal output component, each under `results.message` --
+ * so only that field is read.
+ *
+ * The previous implementation walked every key and collected any string under a
+ * `text`/`message`/`result` branch. On this shape that also swept in the sender,
+ * session id, run id and timestamps, so a single analysis came back as dozens of
+ * "outputs". Reading the documented field keeps provenance (one string per
+ * output component) without the noise.
+ */
+const extractRunOutputs = (outputs: unknown): string[] => {
+	const found: string[] = [];
 
-	if (Array.isArray(value)) {
-		for (const entry of value) collectText(entry, into, collect, depth + 1);
-		return into;
-	}
+	const visit = (value: unknown, depth = 0): void => {
+		// Depth is capped because this walks arbitrary decoded JSON. A hostile or
+		// simply unexpected payload should surface as "no text found", not as a
+		// stack overflow that takes the worker down.
+		if (depth > 16 || value === null || typeof value !== "object") return;
 
-	for (const [key, entry] of Object.entries(value)) {
-		const next = collect || key === "text" || key === "message" || key === "result";
-		collectText(entry, into, next, depth + 1);
-	}
+		if (Array.isArray(value)) {
+			for (const entry of value) visit(entry, depth + 1);
+			return;
+		}
 
-	return into;
+		const record = value as Record<string, unknown>;
+		const results = record.results;
+
+		if (results !== null && typeof results === "object" && !Array.isArray(results)) {
+			const message = (results as Record<string, unknown>).message;
+
+			if (message !== null && typeof message === "object" && !Array.isArray(message)) {
+				const text = (message as Record<string, unknown>).text;
+
+				if (typeof text === "string" && text.trim()) found.push(text);
+			}
+		}
+
+		for (const entry of Object.values(record)) visit(entry, depth + 1);
+	};
+
+	visit(outputs);
+	return found;
 };
 
 /**
- * Builds the webhook body. This is the one place the unconfirmed input shape
- * lives, so correcting it after the owner replies is a single-function edit.
+ * The optional AI-interpretation flow.
+ *
+ * The connector's own flow is deterministic (Bio in, structured JSON out) and
+ * runs with no model access at all. The written interpretation is a *second*,
+ * optional flow — the friend's Insight Analyst (WatsonX granite). Splitting it
+ * out means a broken or unconfigured model can never take the structured
+ * analysis down with it.
  */
-const buildPayload = (job: AnalysisJob, sequence: string): Record<string, unknown> => ({
-	input_value: sequence,
-	analysis_type: job.analysisType,
-	sequence_id: job.sequenceId,
-});
+const insightFlowId = (): string | undefined => process.env.LANGFLOW_INSIGHT_FLOW_ID?.trim() || undefined;
+
+/**
+ * Calls the insight flow with the connector's `{ user_question, analysis_results }`
+ * report and returns its prose, or `undefined` when it is unconfigured or fails.
+ *
+ * Deliberately best-effort: the insight is a reasoning layer over numbers that
+ * are already correct, so a failure here degrades the result, it does not fail
+ * the analysis. Every failure is logged.
+ */
+const runInsightFlow = async (
+	baseUrl: string,
+	apiKey: string,
+	sessionId: string,
+	report: string,
+): Promise<string | undefined> => {
+	const flowId = insightFlowId();
+	if (!flowId) return undefined;
+
+	try {
+		const response = await fetch(`${baseUrl}/api/v1/run/${encodeURIComponent(flowId)}`, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				"x-api-key": apiKey,
+			},
+			body: JSON.stringify({
+				input_value: report,
+				input_type: "chat",
+				output_type: "chat",
+				session_id: sessionId,
+			}),
+			signal: AbortSignal.timeout(Number(process.env.LANGFLOW_TIMEOUT_MS ?? 120000)),
+		});
+
+		if (!response.ok) {
+			console.warn(
+				`[analysis] Insight flow responded with ${response.status}; continuing without AI interpretation.`,
+			);
+			return undefined;
+		}
+
+		const payload = JSON.parse(await response.text()) as Record<string, unknown>;
+		const [text] = extractRunOutputs(payload.outputs);
+		return text && text.trim() ? text : undefined;
+	} catch (error) {
+		console.warn(
+			`[analysis] Insight flow failed; continuing without AI interpretation: ${error instanceof Error ? error.message : String(error)}`,
+		);
+		return undefined;
+	}
+};
+
+/** True when a `/run` text is the connector's structured report, not prose. */
+const isStructuredReport = (text: string): boolean => {
+	try {
+		const parsed = JSON.parse(text) as unknown;
+		return (
+			parsed !== null &&
+			typeof parsed === "object" &&
+			!Array.isArray(parsed) &&
+			"analysis_results" in (parsed as Record<string, unknown>)
+		);
+	} catch {
+		return false;
+	}
+};
 
 export const isLangflowEnabled = () =>
 	(process.env.LANGFLOW_ENABLED ?? "").trim().toLowerCase() === "true";
@@ -141,13 +246,13 @@ export const runLangflowAnalysis = async (
 	// Same reason as the Bio path: the job carries ids, the bases live in S3.
 	const content = await resolve(job.sequenceId);
 
-	const response = await fetch(`${baseUrl}/api/v1/webhook/${encodeURIComponent(flowId)}`, {
+	const response = await fetch(`${baseUrl}/api/v1/run/${encodeURIComponent(flowId)}`, {
 		method: "POST",
 		headers: {
 			"content-type": "application/json",
 			"x-api-key": apiKey,
 		},
-		body: JSON.stringify(buildPayload(job, content.sequence)),
+		body: JSON.stringify(buildRunRequest(job, content.sequence)),
 		signal: AbortSignal.timeout(Number(process.env.LANGFLOW_TIMEOUT_MS ?? 120000)),
 	});
 
@@ -181,7 +286,7 @@ export const runLangflowAnalysis = async (
 		);
 	}
 
-	const collected = collectText(outputs).filter((entry) => entry.trim().length > 0);
+	const collected = extractRunOutputs(outputs).filter((entry) => entry.trim().length > 0);
 
 	if (collected.length === 0) {
 		throw new Error(
@@ -189,13 +294,21 @@ export const runLangflowAnalysis = async (
 		);
 	}
 
+	// Optional AI interpretation, requested after the deterministic report has
+	// already been secured. A failure here is swallowed by `runInsightFlow`, so it
+	// can never fail an analysis that has real numbers.
+	const report = collected.find(isStructuredReport);
+	if (report) {
+		const insight = await runInsightFlow(baseUrl, apiKey, job.sequenceId, report);
+		if (insight) collected.push(insight);
+	}
+
 	return {
 		source: "langflow",
 		flow_id: flowId,
 		session_id: payload.session_id ?? null,
-		// Multiple nodes can emit text (a component plus its parent). Keeping them
-		// ordered and separate preserves provenance; the frontend decides whether
-		// to join or show them individually.
+		// Multiple terminal components can emit text; keeping them ordered and
+		// separate preserves provenance the frontend can rely on.
 		outputs: collected,
 	};
 };

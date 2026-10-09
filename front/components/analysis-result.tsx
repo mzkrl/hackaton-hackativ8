@@ -2,7 +2,7 @@
 
 import dynamic from "next/dynamic";
 
-import { deriveGcContent, parseResult, type AnalysisResult } from "../lib/result";
+import { deriveGcContent, parseResult, type AnalysisResult, type Translation } from "../lib/result";
 import { Empty, Panel, cx, formatDate } from "./primitives";
 
 /**
@@ -49,6 +49,17 @@ export function AnalysisResultView({
 
 	return (
 		<div className="mt-3 flex flex-col gap-3 border-t border-line pt-3 dark:border-night-line">
+			{result.insight ? (
+				<Panel
+					title="AI interpretation"
+					description="A reasoning layer over the figures below. The numbers come from the analysis tool, not the model."
+				>
+					<p className="whitespace-pre-line text-xs leading-relaxed text-forest dark:text-night-text">
+						{result.insight}
+					</p>
+				</Panel>
+			) : null}
+
 			{result.record ? <RecordCard record={result.record} /> : null}
 
 			{result.gcContent !== undefined || derived !== undefined ? (
@@ -59,6 +70,10 @@ export function AnalysisResultView({
 				<Panel title="Nucleotide composition" description="Counts per base.">
 					<CompositionChart composition={result.composition} />
 				</Panel>
+			) : null}
+
+			{result.translation ? (
+				<TranslationCard translation={result.translation} />
 			) : null}
 
 			{result.orfs.length > 0 ? (
@@ -125,6 +140,40 @@ function RecordCard({ record }: { record: NonNullable<AnalysisResult["record"]> 
 				</p>
 			) : null}
 		</div>
+	);
+}
+
+/**
+ * Translated protein.
+ *
+ * The amino-acid string is the result; the counts and the tool's own note are
+ * context. Long proteins are truncated by the box, not by the data, so the full
+ * sequence is always present in the DOM (and in a copy selection).
+ */
+function TranslationCard({ translation }: { translation: Translation }) {
+	const { proteinSequence, proteinLength, nucleotideLength, note, containsStopCodon } =
+		translation;
+
+	return (
+		<Panel
+			title="Translated protein"
+			description={
+				proteinLength !== undefined
+					? `${proteinLength.toLocaleString()} amino acids`
+					: "Amino-acid translation."
+			}
+		>
+			<pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-shell p-3 font-mono text-[11px] leading-relaxed text-forest dark:bg-night dark:text-night-text">
+				{proteinSequence}
+			</pre>
+			<p className="mt-2 text-[11px] text-muted">
+				{nucleotideLength !== undefined
+					? `${nucleotideLength.toLocaleString()} nucleotides translated.`
+					: null}
+				{containsStopCodon === true ? " Contains a stop codon." : ""}
+				{note ? ` ${note}` : ""}
+			</p>
+		</Panel>
 	);
 }
 

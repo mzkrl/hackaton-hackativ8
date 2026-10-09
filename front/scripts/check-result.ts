@@ -44,6 +44,17 @@ const snakeCased = {
 const onlyUnknownKeys = { foo: 1, bar: "two" };
 const wrongTypes = { composition: "not-an-object", gc_content: "42.5", orfs: [null, 3, { start: "x" }] };
 
+/** The normalised `translation` the backend writes for the `translate` tool. */
+const translated = {
+	translation: {
+		protein_sequence: "MLQNR",
+		protein_length: 5,
+		nucleotide_length: 17,
+		note: "Input length (17 nt) is not a multiple of 3; last 2 nucleotide(s) ignored.",
+		contains_stop_codon: false,
+	},
+};
+
 let failures = 0;
 
 const check = (label: string, actual: unknown, expected: unknown) => {
@@ -87,6 +98,15 @@ check("consumed aliases do not leak into extra", snake.extra, { custom_metadata:
 check("GC derived when only composition is given", deriveGcContent(snake.composition), 60);
 check("GC not derivable without composition", deriveGcContent(null), undefined);
 check("GC not derivable from an all-zero composition", deriveGcContent({ A: 0, T: 0, G: 0, C: 0 }), undefined);
+
+const translation = parseResult(translated);
+check("translation protein", translation.translation?.proteinSequence, "MLQNR");
+check("translation protein length", translation.translation?.proteinLength, 5);
+check("translation nucleotide length", translation.translation?.nucleotideLength, 17);
+check("translation stop codon", translation.translation?.containsStopCodon, false);
+check("translation note", translation.translation?.note?.startsWith("Input length"), true);
+check("translation payload leaves nothing over", translation.extra, {});
+check("translation payload is understood", translation.empty, false);
 
 const unknown = parseResult(onlyUnknownKeys);
 check("unknown keys are kept, not dropped", unknown.extra, { foo: 1, bar: "two" });
