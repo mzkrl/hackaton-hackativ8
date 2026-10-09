@@ -16,6 +16,7 @@ node_modules
 .opencode
 *.md
 !CONNECTION.md
+!README.md
 .vscode
 
 
