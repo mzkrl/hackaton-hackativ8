@@ -177,11 +177,20 @@ function useDashboardData() {
 	const [loading, setLoading] = useState(true);
 	const [queueBlock, setQueueBlock] = useState<string | null>(null);
 
-	const trackedIds = useMemo(
-		() => (selectedId ? (tracked[selectedId] ?? []) : []),
-		[selectedId, tracked],
-	);
+	/**
+	 * The project the dashboards describe.
+	 *
+	 * `selectedId` is null until the visitor picks a project, so it falls back to
+	 * the first one. `trackedIds` keys on this, not on the raw `selectedId`: queue
+	 * an analysis on a fresh load and it is tracked under `projects[0].id`, while a
+	 * `selectedId`-keyed lookup would read `tracked[null]` -- empty -- and the
+	 * analysis would never appear.
+	 */
 	const activeId = selectedId ?? projects[0]?.id ?? null;
+	const trackedIds = useMemo(
+		() => (activeId ? (tracked[activeId] ?? []) : []),
+		[activeId, tracked],
+	);
 	const project = projects.find((p) => p.id === activeId) ?? null;
 
 	useEffect(() => {
@@ -231,6 +240,23 @@ function useDashboardData() {
 			})),
 		]);
 	}, [trackedIds]);
+
+	/**
+	 * Load the tracked analyses for the active project whenever the effective
+	 * project (or its track list) changes -- including on mount.
+	 *
+	 * Without this the board only ever filled after a manual Refresh, and the
+	 * Refresh button is disabled while the board is empty, so a reload left it
+	 * permanently blank. Queueing had the same shape of bug: `track()` schedules a
+	 * state update, so the `refreshAnalyses` in the caller's closure still used the
+	 * pre-queue id list; re-running here picks up the committed list.
+	 */
+	useEffect(() => {
+		// Deferred a tick so the state updates happen in a callback, not
+		// synchronously in the effect body -- the rule the tracked-load effect above
+		// also works around.
+		void Promise.resolve().then(() => refreshAnalyses());
+	}, [refreshAnalyses]);
 
 	const reloadSequences = useCallback(async () => {
 		setSequences(activeId ? await listSequences(activeId) : []);
@@ -353,12 +379,41 @@ function useDashboardData() {
 		[],
 	);
 
+	const untrack = useCallback(
+		(projectId: string, analysisId: string) => {
+			setTracked((current) => {
+				const next = {
+					...current,
+					[projectId]: (current[projectId] ?? []).filter((id) => id !== analysisId),
+				};
+				writeTracked(next);
+				return next;
+			});
+		},
+		[],
+	);
+
 	const onAnalysisQueued = useCallback(
 		async (analysisId: string) => {
 			if (activeId) track(activeId, analysisId);
 			await refreshAnalyses();
 		},
 		[activeId, track, refreshAnalyses],
+	);
+
+	/**
+	 * Drops a deleted analysis from the tracked list.
+	 *
+	 * No refresh is issued here on purpose: `refreshAnalyses` closes over the
+	 * pre-delete id list, so calling it now would poll an id that no longer
+	 * exists and 404. The `refreshAnalyses` identity changes with `trackedIds`,
+	 * and the load effect re-runs against the list that no longer has the id.
+	 */
+	const onAnalysisDeleted = useCallback(
+		(analysisId: string) => {
+			if (activeId) untrack(activeId, analysisId);
+		},
+		[activeId, untrack],
 	);
 
 	const sequenceLabels = useMemo(() => {
@@ -388,6 +443,7 @@ function useDashboardData() {
 		reloadMessages,
 		track,
 		onAnalysisQueued,
+		onAnalysisDeleted,
 		activeId,
 		project,
 		sequenceLabels,
@@ -423,6 +479,7 @@ function DashboardContent({
 		reloadSequences,
 		reloadMessages,
 		onAnalysisQueued,
+		onAnalysisDeleted,
 		activeId,
 		project,
 		sequenceLabels,
@@ -534,7 +591,13 @@ function DashboardContent({
 							onQueueBlocked={setQueueBlock}
 						/>
 
-						<AnalysisBoard analyses={analyses} sequenceLabels={sequenceLabels} onRefresh={refresh} />
+						<AnalysisBoard
+							analyses={analyses}
+							sequenceLabels={sequenceLabels}
+							onRefresh={refresh}
+							onQueued={onAnalysisQueued}
+							onDeleted={onAnalysisDeleted}
+						/>
 
 						<NotesPanel projectId={project.id} messages={messages} onChanged={reloadMessages} />
 					</>

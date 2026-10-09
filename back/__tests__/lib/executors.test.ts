@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { runBioAnalysis } from "../../src/lib/bio-executor";
 import { isLangflowEnabled, langflowConfigured, runLangflowAnalysis } from "../../src/lib/langflow-executor";
 import { runAnalysis } from "../../src/lib/analysis-executor";
-import { checkLangflow, probeLangflowWebhook } from "../../src/lib/analysis-dependencies";
+import { checkLangflow, probeLangflowFlow } from "../../src/lib/analysis-dependencies";
 import type { AnalysisJob } from "../../src/lib/queue";
 import type { SequenceResolver } from "../../src/lib/sequence-content";
 
@@ -45,7 +45,9 @@ const envKeys = [
 	"LANGFLOW_API_KEY",
 	"LANGFLOW_ENABLED",
 	"LANGFLOW_TIMEOUT_MS",
-	"LANGFLOW_WEBHOOK_PROBE",
+	"LANGFLOW_COMPONENT_NAME",
+	"LANGFLOW_FLOW_PROBE",
+	"LANGFLOW_INSIGHT_FLOW_ID",
 ] as const;
 
 const saved = new Map<string, string | undefined>();
@@ -79,12 +81,46 @@ const bioOk = () => json({ status: "ok", file_metadata: { name: "probe" }, resul
 const langflowOk = () =>
 	json({
 		session_id: "sess-123",
-		outputs: {
-			"ChatOutput-6abVJ": {
-				outputs: { message: { text: "GC content is 51%." } },
+		outputs: [
+			{
+				inputs: { input_value: SEQUENCE },
+				outputs: [
+					{
+						results: { message: { text: "GC content is 51%." } },
+						// Metadata sits alongside the text, as the real endpoint
+						// returns it; none of it may leak into the outputs.
+						outputs: { message: { message: "GC content is 51%.", type: "text" } },
+						messages: [{ message: "GC content is 51%.", sender: "Machine" }],
+					},
+				],
 			},
-		},
+		],
 	});
+
+/** The connector's real output: a JSON `{ user_question, analysis_results }`. */
+const structuredReport = {
+	user_question: "gc_content",
+	analysis_results: {
+		calculate_gc_content: { gc_content_percent: 51, gc_count: 20, at_count: 20, total_length: 40 },
+		calculate_nucleotide_composition: {
+			counts: { A: 10, T: 10, G: 10, C: 10, U: 0, other: 0 },
+			total_length: 40,
+		},
+	},
+};
+
+const langflowStructuredOk = () =>
+	json({
+		session_id: "sess-123",
+		outputs: [
+			{
+				outputs: [{ results: { message: { text: JSON.stringify(structuredReport) } } }],
+			},
+		],
+	});
+
+const insightOk = () =>
+	json({ outputs: [{ outputs: [{ results: { message: { text: "The GC content is 51%." } } }] }] });
 
 const bodyOf = (call: Call) => JSON.parse(String(call.init?.body ?? "{}")) as Record<string, unknown>;
 const headersOf = (call: Call) => (call.init?.headers ?? {}) as Record<string, string>;
@@ -188,15 +224,15 @@ describe("Bio Service executor", () => {
 		await expect(runBioAnalysis(job, resolveStub)).rejects.toThrow(/responded with 502/);
 	});
 
-	test("refuses a type the Bio Service cannot perform, without calling it", async () => {
-		// `blast` is a search against external databases; the service has no such
-		// tool. Posting a placeholder name would return 400, so the request is
-		// never made.
+	test("refuses a type with no Bio tool, without calling it", async () => {
+		// `reverse_complement` is not a Bio Service tool (and is no longer an
+		// allowed analysis type). Posting a placeholder name would return 400, so
+		// the request is never made.
 		stubFetch(() => bioOk());
 
 		await expect(
-			runBioAnalysis({ ...job, analysisType: "blast" }, resolveStub),
-		).rejects.toThrow(/cannot perform "blast"/);
+			runBioAnalysis({ ...job, analysisType: "reverse_complement" }, resolveStub),
+		).rejects.toThrow(/Unknown analysis type/);
 		expect(calls).toHaveLength(0);
 	});
 
@@ -218,21 +254,46 @@ describe("Langflow executor", () => {
 		process.env.LANGFLOW_API_KEY = "test-key";
 	});
 
-	test("posts to the webhook path with the api key header", async () => {
+	test("posts to the synchronous run path with the api key header", async () => {
 		stubFetch(() => langflowOk());
 
 		await runLangflowAnalysis(job, resolveStub);
 
-		expect(calls[0]!.url).toBe("https://langflow.example/api/v1/webhook/flow-abc");
+		expect(calls[0]!.url).toBe("https://langflow.example/api/v1/run/flow-abc");
 		expect(headersOf(calls[0]!)["x-api-key"]).toBe("test-key");
 	});
 
-	test("sends the resolved sequence, not a sequence id", async () => {
+	test("sends the resolved sequence as the run input, not a sequence id", async () => {
 		stubFetch(() => langflowOk());
 
 		await runLangflowAnalysis(job, resolveStub);
 
 		expect(bodyOf(calls[0]!).input_value).toBe(SEQUENCE);
+		expect(bodyOf(calls[0]!).session_id).toBe(job.sequenceId);
+	});
+
+	test("carries the analysis type in a tweak, not in the sequence", async () => {
+		stubFetch(() => langflowOk());
+
+		await runLangflowAnalysis(job, resolveStub);
+
+		// The connector maps the GenePilot analysis type to a Bio tool name, so
+		// it needs the type as a component parameter. Concatenating it into the
+		// sequence text would corrupt the bases.
+		expect(bodyOf(calls[0]!).tweaks).toEqual({
+			"Bio Analysis Connector": { analysis_type: "gc_content" },
+		});
+	});
+
+	test("allows the tweak component name to be overridden", async () => {
+		process.env.LANGFLOW_COMPONENT_NAME = "Custom Connector";
+		stubFetch(() => langflowOk());
+
+		await runLangflowAnalysis(job, resolveStub);
+
+		expect(bodyOf(calls[0]!).tweaks).toEqual({
+			"Custom Connector": { analysis_type: "gc_content" },
+		});
 	});
 
 	test("percent-encodes the flow id so it cannot alter the path", async () => {
@@ -241,7 +302,7 @@ describe("Langflow executor", () => {
 
 		await runLangflowAnalysis(job, resolveStub);
 
-		expect(calls[0]!.url).toBe("https://langflow.example/api/v1/webhook/..%2Fother-flow");
+		expect(calls[0]!.url).toBe("https://langflow.example/api/v1/run/..%2Fother-flow");
 	});
 
 	test("normalises nested flow outputs and keeps the session id", async () => {
@@ -264,7 +325,7 @@ describe("Langflow executor", () => {
 	});
 
 	test("rejects outputs that carry no text", async () => {
-		stubFetch(() => json({ outputs: { "ChatOutput-6abVJ": { outputs: {} } } }));
+		stubFetch(() => json({ outputs: [{ outputs: [{ results: { message: {} } }] }] }));
 
 		await expect(runLangflowAnalysis(job, resolveStub)).rejects.toThrow(/no text was found/);
 	});
@@ -316,6 +377,46 @@ describe("Langflow executor", () => {
 	});
 });
 
+describe("optional insight flow", () => {
+	beforeEach(() => {
+		process.env.LANGFLOW_URL = "https://langflow.example";
+		process.env.LANGFLOW_MAIN_FLOW_ID = "flow-abc";
+		process.env.LANGFLOW_API_KEY = "test-key";
+	});
+
+	test("runs the insight flow with the report and appends its prose", async () => {
+		process.env.LANGFLOW_INSIGHT_FLOW_ID = "insight-abc";
+		stubFetch((url) => (url.includes("insight-abc") ? insightOk() : langflowStructuredOk()));
+
+		const outcome = await runLangflowAnalysis(job, resolveStub);
+
+		expect(calls).toHaveLength(2);
+		expect(calls[1]!.url).toBe("https://langflow.example/api/v1/run/insight-abc");
+		// The insight flow's Chat Input expects exactly `{user_question, analysis_results}`.
+		expect(bodyOf(calls[1]!).input_value).toBe(JSON.stringify(structuredReport));
+		expect(outcome.outputs).toEqual([JSON.stringify(structuredReport), "The GC content is 51%."]);
+	});
+
+	test("never calls the insight flow when it is unconfigured", async () => {
+		stubFetch(() => langflowStructuredOk());
+
+		await runLangflowAnalysis(job, resolveStub);
+
+		expect(calls).toHaveLength(1);
+	});
+
+	test("keeps the structured result when the insight flow fails", async () => {
+		process.env.LANGFLOW_INSIGHT_FLOW_ID = "insight-abc";
+		stubFetch((url) => (url.includes("insight-abc") ? json({}, 500) : langflowStructuredOk()));
+
+		const outcome = await runLangflowAnalysis(job, resolveStub);
+
+		// The numbers are already correct; a broken reasoning layer must not
+		// take them down with it.
+		expect(outcome.outputs).toEqual([JSON.stringify(structuredReport)]);
+	});
+});
+
 describe("executor dispatch", () => {
 	test("uses Langflow when it is enabled and configured", async () => {
 		process.env.LANGFLOW_ENABLED = "true";
@@ -329,6 +430,22 @@ describe("executor dispatch", () => {
 
 		expect(outcome.source).toBe("langflow");
 		expect(calls).toHaveLength(1);
+	});
+
+	test("normalises the outcome so result_json is flat regardless of executor", async () => {
+		process.env.LANGFLOW_ENABLED = "true";
+		process.env.LANGFLOW_URL = "https://langflow.example";
+		process.env.LANGFLOW_MAIN_FLOW_ID = "flow-abc";
+		process.env.LANGFLOW_API_KEY = "test-key";
+		stubFetch(() => langflowStructuredOk());
+
+		const outcome = await runAnalysis(job, resolveStub);
+
+		// The frontend reads flat fields; the wrapped executor shape must not
+		// reach `result_json`.
+		expect(outcome.source).toBe("langflow");
+		expect(outcome.gc_content).toBe(51);
+		expect(outcome.composition).toEqual({ A: 10, T: 10, G: 10, C: 10 });
 	});
 
 	test("uses the Bio Service when Langflow is disabled", async () => {
@@ -376,12 +493,12 @@ describe("dependency probe", () => {
 		process.env.LANGFLOW_API_KEY = "test-key";
 	});
 
-	test("treats a rejected probe body as a healthy wiring", async () => {
-		// 400/422 means the endpoint is live and authenticated and simply declined
-		// the empty payload -- which is exactly what a probe should provoke.
-		stubFetch(() => new Response("", { status: 422 }));
+	test("treats a found flow as a healthy wiring", async () => {
+		// 200 means the id exists and the key was accepted -- the whole point of
+		// the probe, and something `/health_check` cannot tell us.
+		stubFetch(() => new Response("{}", { status: 200 }));
 
-		const result = await probeLangflowWebhook("https://langflow.example", "flow-abc", "k");
+		const result = await probeLangflowFlow("https://langflow.example", "flow-abc", "k");
 
 		expect(result.reachable).toBe(true);
 	});
@@ -389,7 +506,7 @@ describe("dependency probe", () => {
 	test("calls a rejected key unreachable, because every analysis would fail", async () => {
 		stubFetch(() => new Response("", { status: 401 }));
 
-		const result = await probeLangflowWebhook("https://langflow.example", "flow-abc", "bad");
+		const result = await probeLangflowFlow("https://langflow.example", "flow-abc", "bad");
 
 		// The distinction that matters: the host is up, the pipeline is broken.
 		expect(result.reachable).toBe(false);
@@ -399,15 +516,15 @@ describe("dependency probe", () => {
 	test("calls a 404 an unknown flow rather than a wiring success", async () => {
 		stubFetch(() => new Response("", { status: 404 }));
 
-		const result = await probeLangflowWebhook("https://langflow.example", "missing", "k");
+		const result = await probeLangflowFlow("https://langflow.example", "missing", "k");
 
 		expect(result.reachable).toBe(false);
 		expect(result.detail).toMatch(/404/);
 	});
 
-	test("does not run the flow unless the operator opted in", async () => {
-		// Default: only /health_check is touched. A POST here would invoke the model
-		// and spend tokens on every monitor tick.
+	test("does not touch the flow unless the operator opted in", async () => {
+		// Default: only /health_check is touched. The flow probe is opt-in so an
+		// uptime monitor never depends on a specific flow id.
 		stubFetch(() => new Response("", { status: 200 }));
 
 		await checkLangflow();
@@ -416,21 +533,21 @@ describe("dependency probe", () => {
 		expect(calls[0]!.url).toContain("/health_check");
 	});
 
-test("posts the webhook only when the probe is explicitly enabled", async () => {
-		process.env.LANGFLOW_WEBHOOK_PROBE = "1";
-		// The health route is healthy; the webhook declines the empty probe body.
+	test("checks the flow only when the probe is explicitly enabled", async () => {
+		process.env.LANGFLOW_FLOW_PROBE = "1";
+		// The health route is healthy; the flow exists and the key is accepted.
 		// The reported verdict is the conjunction, so both must succeed.
-		stubFetch((url) => (url.includes("health_check") ? new Response("", { status: 200 }) : new Response("", { status: 422 })));
+		stubFetch((url) => (url.includes("health_check") ? new Response("", { status: 200 }) : new Response("{}", { status: 200 })));
 
 		const status = await checkLangflow();
 
 		expect(calls).toHaveLength(2);
-		expect(calls[1]!.url).toBe("https://langflow.example/api/v1/webhook/flow-abc");
+		expect(calls[1]!.url).toBe("https://langflow.example/api/v1/flows/flow-abc");
 		expect(status.reachable).toBe(true);
 	});
 
-	test("stays unhealthy when the webhook is broken even though the host is up", async () => {
-		process.env.LANGFLOW_WEBHOOK_PROBE = "1";
+	test("stays unhealthy when the flow probe fails even though the host is up", async () => {
+		process.env.LANGFLOW_FLOW_PROBE = "1";
 		stubFetch((url) => (url.includes("health_check") ? new Response("", { status: 200 }) : new Response("", { status: 401 })));
 
 		const status = await checkLangflow();

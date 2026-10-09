@@ -3,7 +3,7 @@
 import { useState } from "react";
 
 import { describeError } from "../lib/api";
-import { getAnalysis, type Analysis } from "../lib/genomics";
+import { deleteAnalysis, getAnalysis, queueAnalysis, type Analysis } from "../lib/genomics";
 import { AnalysisResultView } from "./analysis-result";
 import { Button, Empty, Notice, Panel, StatusBadge, formatDate } from "./primitives";
 
@@ -21,10 +21,16 @@ export function AnalysisBoard({
 	analyses,
 	sequenceLabels,
 	onRefresh,
+	onQueued,
+	onDeleted,
 }: {
 	analyses: Analysis[];
 	sequenceLabels: Record<string, string>;
 	onRefresh: () => void;
+	/** A retry submits a fresh row, which the parent then tracks. */
+	onQueued: (analysisId: string) => void;
+	/** The row is gone server-side; the parent drops it from its tracked list. */
+	onDeleted: (analysisId: string) => void;
 }) {
 	return (
 		<Panel
@@ -46,6 +52,8 @@ export function AnalysisBoard({
 							analysis={analysis}
 							label={sequenceLabels[analysis.sequenceId] ?? "unknown sequence"}
 							onRefresh={onRefresh}
+							onQueued={onQueued}
+							onDeleted={onDeleted}
 						/>
 					))}
 				</ul>
@@ -58,12 +66,17 @@ function AnalysisRow({
 	analysis,
 	label,
 	onRefresh,
+	onQueued,
+	onDeleted,
 }: {
 	analysis: Analysis;
 	label: string;
 	onRefresh: () => void;
+	onQueued: (analysisId: string) => void;
+	onDeleted: (analysisId: string) => void;
 }) {
 	const [error, setError] = useState<string | null>(null);
+	const [busy, setBusy] = useState(false);
 
 	const load = async () => {
 		setError(null);
@@ -74,6 +87,39 @@ function AnalysisRow({
 			onRefresh();
 		} catch (caught) {
 			setError(describeError(caught));
+		}
+	};
+
+	const retry = async () => {
+		setError(null);
+		setBusy(true);
+		try {
+			// A retry is a fresh row on purpose: the old job id may still sit in
+			// Redis and BullMQ dedupes on jobId, so re-using this analysis would
+			// silently do nothing.
+			const created = await queueAnalysis({
+				sequenceId: analysis.sequenceId,
+				analysisType: analysis.analysisType,
+			});
+			onQueued(created.id);
+		} catch (caught) {
+			setError(describeError(caught));
+		} finally {
+			setBusy(false);
+		}
+	};
+
+	const remove = async () => {
+		if (!window.confirm("Delete this analysis? This cannot be undone.")) return;
+		setError(null);
+		setBusy(true);
+		try {
+			await deleteAnalysis(analysis.id);
+			onDeleted(analysis.id);
+		} catch (caught) {
+			setError(describeError(caught));
+		} finally {
+			setBusy(false);
 		}
 	};
 
@@ -93,7 +139,17 @@ function AnalysisRow({
 
 				<div className="flex items-center gap-1.5">
 					<StatusBadge status={analysis.status} />
-					<Button onClick={load}>Reload</Button>
+					<Button onClick={load} disabled={busy}>
+						Reload
+					</Button>
+					{analysis.status === "failed" && analysis.sequenceId ? (
+						<Button onClick={retry} disabled={busy}>
+							Retry
+						</Button>
+					) : null}
+					<Button variant="accent" onClick={remove} disabled={busy}>
+						Delete
+					</Button>
 				</div>
 			</div>
 

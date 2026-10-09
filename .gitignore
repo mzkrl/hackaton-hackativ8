@@ -1,11 +1,13 @@
 # aku pake graphify kang
 graphify-out
 
-# Secrets. Only `.env` itself is ignored — `.env.example` files are config
-# documentation and are meant to be committed.
+# Secrets. `.env` and the concrete production file are ignored; `.env.example`
+# files are config documentation and are meant to be committed.
 .env
 .env.local
 .env.*.local
+.env.production
+.env.production.local
 
 node_modules
 

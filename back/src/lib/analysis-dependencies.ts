@@ -95,41 +95,36 @@ const checkSequenceAnalysisApi = async (): Promise<DependencyStatus> => {
 };
 
 /**
- * Probes the real webhook endpoint, if the operator has opted in.
+ * Confirms the flow id and API key against the real flow, if the operator opted in.
  *
- * This is opt-in via `LANGFLOW_WEBHOOK_PROBE=1` because a POST to a Langflow
- * webhook **runs the flow**: it invokes the model, spends tokens, and burns a
- * worker slot. A health endpoint polled by an uptime monitor must not do that
- * repeatedly, so the default probe stays on the cheap `/health_check` route.
+ * This is opt-in via `LANGFLOW_FLOW_PROBE=1` because it is the only check that
+ * proves the id and key are live: `/health_check` is unauthenticated and reports
+ * green even when the key has been revoked. Unlike a run it does not execute the
+ * flow, so it is cheap and safe to repeat.
  *
- * When it is enabled, an intentionally empty body is sent. The response status
- * is what carries the verdict, and the mapping below is chosen so the probe
- * distinguishes the failure modes that send people to the wrong layer:
+ * The status mapping is chosen so the probe distinguishes the failure modes that
+ * send people to the wrong layer:
  *
- * | Status  | Meaning                                                        |
- * |---------|----------------------------------------------------------------|
- * | 2xx     | Endpoint worked and the flow ran. Costs one run per probe.        |
- * | 400/422 | Rejected the empty payload. Expected: host, path and key are fine |
- * | 401/403 | Host and path fine, **API key rejected** -> pipeline would fail  |
- * | 404     | Flow id wrong, or the path is wrong                              |
- * | 5xx     | Reached the service, but it is erroring                          |
- * | no reply| Cannot reach it at all                                           |
+ * | Status  | Meaning                                                          |
+ * |---------|------------------------------------------------------------------|
+ * | 2xx     | Flow found and the API key was accepted.                          |
+ * | 401/403 | Host and path fine, **API key rejected** -> every run would fail  |
+ * | 404     | The flow id does not exist at this host                           |
+ * | 5xx     | Reached the service, but it is erroring                           |
+ * | no reply| Cannot reach it at all                                            |
  *
- * Exported so the status-to-verdict mapping can be tested without spending a
- * real flow run on every CI run.
+ * Exported so the status-to-verdict mapping can be tested without a live server.
  */
-export const probeLangflowWebhook = async (
+export const probeLangflowFlow = async (
 	base: string,
 	flowId: string,
 	apiKey: string,
 ): Promise<{ reachable: boolean; detail: string }> => {
 	try {
 		const response = await fetch(
-			`${base.replace(/\/$/, "")}/api/v1/webhook/${encodeURIComponent(flowId)}`,
+			`${base.replace(/\/$/, "")}/api/v1/flows/${encodeURIComponent(flowId)}`,
 			{
-				method: "POST",
-				headers: { "content-type": "application/json", "x-api-key": apiKey },
-				body: "{}",
+				headers: { "x-api-key": apiKey },
 				signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
 			},
 		);
@@ -137,42 +132,33 @@ export const probeLangflowWebhook = async (
 		if (response.ok) {
 			return {
 				reachable: true,
-				detail: "webhook reachable (the probe body was accepted and the flow ran)",
-			};
-		}
-
-		if (response.status === 400 || response.status === 422) {
-			// The expected outcome: the endpoint is live and authenticated, and it
-			// declined an empty payload. That is a healthy wiring.
-			return {
-				reachable: true,
-				detail: `webhook reachable and authenticated; rejected the empty probe body with ${response.status}`,
+				detail: "flow found and the API key was accepted",
 			};
 		}
 
 		if (response.status === 401 || response.status === 403) {
 			return {
 				reachable: false,
-				detail: `webhook found but the API key was rejected (${response.status}) — every analysis will fail until LANGFLOW_API_KEY is replaced`,
+				detail: `flow found but the API key was rejected (${response.status}) — every analysis will fail until LANGFLOW_API_KEY is replaced`,
 			};
 		}
 
 		if (response.status === 404) {
 			return {
 				reachable: false,
-				detail: "webhook returned 404 — the flow id does not exist at this host",
+				detail: "flow returned 404 — LANGFLOW_MAIN_FLOW_ID does not exist at this host",
 			};
 		}
 
 		return {
 			reachable: false,
-			detail: `webhook reachable but erroring: HTTP ${response.status}`,
+			detail: `flow reachable but erroring: HTTP ${response.status}`,
 		};
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "unknown error";
 		return {
 			reachable: false,
-			detail: `webhook unreachable: ${/timeout|abort/i.test(message) ? "no response within timeout" : message}`,
+			detail: `flow unreachable: ${/timeout|abort/i.test(message) ? "no response within timeout" : message}`,
 		};
 	}
 };
@@ -191,9 +177,9 @@ export const checkLangflow = async (): Promise<DependencyStatus> => {
 		};
 	}
 
-	// Health, not the webhook by default: the webhook is POST-only, so a GET
-	// against it returns 404 even when everything is wired correctly, which would
-	// report a healthy deployment as broken.
+	// `/health_check` is unauthenticated, so it stays the default: it is cheap
+	// and safe for an uptime monitor. The opt-in flow probe below is what proves
+	// the id and key belong together.
 	const { reachable, detail } = await probe(
 		`${base.replace(/\/$/, "")}/health_check`,
 	);
@@ -201,7 +187,7 @@ export const checkLangflow = async (): Promise<DependencyStatus> => {
 	const notes = [detail];
 
 	if (!flowId) {
-		notes.push("LANGFLOW_MAIN_FLOW_ID is not set, so no webhook URL can be built");
+		notes.push("LANGFLOW_MAIN_FLOW_ID is not set, so the flow probe cannot run");
 	}
 
 	if (!apiKey) {
@@ -213,15 +199,15 @@ export const checkLangflow = async (): Promise<DependencyStatus> => {
 	// configured is what let a missing key masquerade as a healthy deployment.
 	const fullyConfigured = Boolean(base && flowId && apiKey);
 
-	if (fullyConfigured && trimmed(process.env.LANGFLOW_WEBHOOK_PROBE) === "1") {
-		const webhook = await probeLangflowWebhook(base, flowId, apiKey);
-		notes.push(webhook.detail);
+	if (fullyConfigured && trimmed(process.env.LANGFLOW_FLOW_PROBE) === "1") {
+		const flow = await probeLangflowFlow(base, flowId, apiKey);
+		notes.push(flow.detail);
 		return {
 			name: "langflow",
 			configured: true,
-			// The webhook verdict wins: `/health_check` says the process is up,
-			// the webhook says the pipeline will actually work.
-			reachable: reachable && webhook.reachable,
+			// The flow verdict wins: `/health_check` says the process is up, the
+			// flow probe says the pipeline will actually work.
+			reachable: reachable && flow.reachable,
 			detail: notes.join("; "),
 		};
 	}

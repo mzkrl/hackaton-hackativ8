@@ -60,6 +60,16 @@ export type BlastHit = {
 	subjectLength?: number;
 };
 
+export type Translation = {
+	/** Amino-acid string, as reported by the tool. */
+	proteinSequence?: string;
+	proteinLength?: number;
+	nucleotideLength?: number;
+	/** e.g. "Input length is not a multiple of 3; last N nucleotide(s) ignored." */
+	note?: string;
+	containsStopCodon?: boolean;
+};
+
 export type AnalysisResult = {
 	record?: SequenceRecord;
 	composition: Composition;
@@ -67,6 +77,13 @@ export type AnalysisResult = {
 	orfs: Orf[];
 	blastProgram?: string;
 	blastHits: BlastHit[];
+	/** Translated protein, when the `translate` tool ran. */
+	translation?: Translation;
+	/**
+	 * Optional AI interpretation written by the Insight Analyst flow. Prose, not
+	 * data: it is a reasoning layer over the figures, never their source.
+	 */
+	insight?: string;
 	/** Keys present in the payload that none of the renderers claimed. */
 	extra: Record<string, unknown>;
 	/** True when nothing at all was understood, so the caller shows raw JSON. */
@@ -143,6 +160,28 @@ const readRecord = (value: unknown): SequenceRecord | undefined => {
 	};
 };
 
+/** The translated protein, from whichever key the payload used. */
+const readTranslation = (value: unknown): Translation | undefined => {
+	const source = record(value);
+	if (!source) return undefined;
+
+	const proteinSequence = str(source.protein_sequence) ?? str(source.proteinSequence);
+	if (!proteinSequence) return undefined;
+
+	return {
+		proteinSequence,
+		proteinLength: num(source.protein_length) ?? num(source.proteinLength),
+		nucleotideLength: num(source.nucleotide_length) ?? num(source.nucleotideLength),
+		note: str(source.note),
+		containsStopCodon:
+			typeof source.contains_stop_codon === "boolean"
+				? source.contains_stop_codon
+				: typeof source.containsStopCodon === "boolean"
+					? source.containsStopCodon
+					: undefined,
+	};
+};
+
 /**
  * Every key the readers above can consume. Anything not in this list falls
  * through to `extra` and is still shown, so a payload from an older or newer
@@ -172,6 +211,10 @@ const CLAIMED_KEYS = new Set([
 	"hits",
 	"blastHits",
 	"blast_hits",
+	// translated protein
+	"translation",
+	// AI interpretation
+	"insight",
 ]);
 
 export const parseResult = (payload: unknown): AnalysisResult => {
@@ -187,6 +230,8 @@ export const parseResult = (payload: unknown): AnalysisResult => {
 		orfs: readOrfs(source.orfs ?? source.ORFs ?? source.openReadingFrames ?? source.open_reading_frames),
 		blastProgram: str(source.program) ?? str(source.blastProgram) ?? str(source.blast_program),
 		blastHits: readHits(source.hits ?? source.blastHits ?? source.blast_hits),
+		translation: readTranslation(source.translation),
+		insight: str(source.insight),
 		extra: {},
 		empty: false,
 	};
@@ -202,6 +247,8 @@ export const parseResult = (payload: unknown): AnalysisResult => {
 		result.gcContent === undefined &&
 		result.orfs.length === 0 &&
 		result.blastHits.length === 0 &&
+		!result.translation &&
+		!result.insight &&
 		Object.keys(result.extra).length === 0;
 
 	return result;

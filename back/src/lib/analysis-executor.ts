@@ -2,6 +2,7 @@ import { UnrecoverableError } from "bullmq";
 
 import { runBioAnalysis } from "./bio-executor";
 import { isLangflowEnabled, langflowConfigured, runLangflowAnalysis } from "./langflow-executor";
+import { normalizeAnalysisOutcome } from "./normalize-result";
 import type { AnalysisOutcome } from "./bio-executor";
 import type { AnalysisJob } from "./queue";
 import type { SequenceResolver } from "./sequence-content";
@@ -45,7 +46,8 @@ export const runAnalysis = async (
 
 	if (langflowActive && langflowConfigured()) {
 		try {
-			return await runLangflowAnalysis(job, resolve);
+			const outcome = await runLangflowAnalysis(job, resolve);
+			return normalizeAnalysisOutcome(outcome);
 		} catch (error) {
 			const unrecoverable = isUnrecoverable(error);
 
@@ -55,5 +57,7 @@ export const runAnalysis = async (
 		}
 	}
 
-	return runBioAnalysis(job, resolve);
+	// Both paths are normalised here, after any fallback, so `result_json` has
+	// one flat shape regardless of which executor produced it.
+	return normalizeAnalysisOutcome(await runBioAnalysis(job, resolve));
 };
