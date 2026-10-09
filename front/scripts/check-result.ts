@@ -9,6 +9,7 @@
  * lands with a different shape, this is what tells us.
  */
 
+import { parseInsightBlocks } from "../lib/insight";
 import { deriveAtContent, deriveGcContent, parseResult } from "../lib/result";
 
 /** The response exactly as written in the plan, section 4.11. */
@@ -214,6 +215,50 @@ check("legacy sequence type", legacy.sequenceType?.sequenceType, "DNA");
 check("legacy validation", legacy.validation?.iupacDnaValid, true);
 check("legacy fasta length", legacy.fasta?.records[0]?.length, 12);
 check("legacy raw tool blobs do not leak into extra", legacy.extra, {});
+
+/**
+ * The Insight Analyst emits a small Markdown subset; these pin what the block
+ * parser must recover from the shapes actually seen in a card.
+ */
+const insightProse = `**Direct Summary:**
+The GC content of the analyzed sequence is 45.517%.
+
+**Key Findings & Metrics:**
+- **GC Content:** 45.517%
+- **GC Count:** 2,386 bases
+
+**Limitations / Context:**
+The provided metrics do not infer any functional characteristics.`;
+
+const insightBlocks = parseInsightBlocks(insightProse);
+check("insight block count", insightBlocks.length, 4);
+check("insight summary keeps its label line", insightBlocks[0], {
+	kind: "paragraph",
+	text: "**Direct Summary:**\nThe GC content of the analyzed sequence is 45.517%.",
+});
+check("insight section label", insightBlocks[1], {
+	kind: "paragraph",
+	text: "**Key Findings & Metrics:**",
+});
+check("insight bullet list", insightBlocks[2], {
+	kind: "list",
+	ordered: false,
+	items: ["**GC Content:** 45.517%", "**GC Count:** 2,386 bases"],
+});
+check("insight limitation paragraph", insightBlocks[3], {
+	kind: "paragraph",
+	text: "**Limitations / Context:**\nThe provided metrics do not infer any functional characteristics.",
+});
+
+const miscBlocks = parseInsightBlocks("### Heading\n1. one\n2. two\n\nplain");
+check("insight heading", miscBlocks[0], { kind: "heading", level: 3, text: "Heading" });
+check("insight ordered list", miscBlocks[1], { kind: "list", ordered: true, items: ["one", "two"] });
+check("insight trailing paragraph", miscBlocks[2], { kind: "paragraph", text: "plain" });
+
+// A list directly after a paragraph must not absorb it.
+const tightList = parseInsightBlocks("Intro\n- item");
+check("insight paragraph before list", tightList[0], { kind: "paragraph", text: "Intro" });
+check("insight list after paragraph", tightList[1], { kind: "list", ordered: false, items: ["item"] });
 
 check("AT derived from composition", deriveAtContent({ A: 2, T: 2, G: 1, C: 1 }), 66.7);
 check("AT not derivable without composition", deriveAtContent(null), undefined);

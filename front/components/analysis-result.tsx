@@ -16,6 +16,7 @@ import {
 	type Validation,
 } from "../lib/result";
 import { Empty, Panel, cx, formatDate } from "./primitives";
+import { InsightMarkdown } from "./insight-markdown";
 
 /**
  * Recharts measures the DOM, so it cannot be prerendered. `ssr: false` is only
@@ -67,9 +68,7 @@ export function AnalysisResultView({
 					title="AI interpretation"
 					description="A reasoning layer over the figures below. The numbers come from the analysis tool, not the model."
 				>
-					<p className="whitespace-pre-line text-xs leading-relaxed text-forest dark:text-night-text">
-						{result.insight}
-					</p>
+					<InsightMarkdown text={result.insight} />
 				</Panel>
 			) : null}
 
