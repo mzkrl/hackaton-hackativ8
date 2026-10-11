@@ -1,80 +1,37 @@
-name: gene-pilot
+# Local development stack for Genomic Insight Agent.
+#
+# Production runs the same three services on a single VPS, and the API and the
+# analysis worker run beside them. In development this file brings up just the
+# datastores so the API can be run from source with `bun run dev`.
+#
+#   docker compose up -d
+#   docker compose ps
+#   docker compose down          # stop, keep data
+#   docker compose down -v       # stop and delete data
+#
+# Every value can be overridden with an environment variable or a .env file next
+# to this file, so the defaults work with no setup at all.
 
-# 1. Deklarasi Network di tingkat file Compose
-networks:
-  # Network internal: Hanya untuk komunikasi antar database, backend, minio, dll.
-  internal_net:
-    driver: bridge
-
-  # Network eksternal: Digunakan bersama dengan Nginx Proxy Manager (NPM)
-  web_net:
-    external: true
+name: genomic-insight
 
 services:
-
-  # ==========================
-  # Langflow
-  # ==========================
-
-  langflow:
-    image: langflowai/langflow:latest
-    environment:
-      LANGFLOW_DATABASE_URL: ${LANGFLOW_DATABASE_URL}
-      LANGFLOW_CONFIG_DIR: ${LANGFLOW_CONFIG_DIR}
-      LANGFLOW_SUPERUSER: ${LANGFLOW_SUPERUSER}
-      LANGFLOW_SUPERUSER_PASSWORD: ${LANGFLOW_SUPERUSER_PASSWORD}
-      LANGFLOW_NEW_USER_IS_ACTIVE: ${LANGFLOW_NEW_USER_IS_ACTIVE}
-      LANGFLOW_AUTO_LOGIN: ${LANGFLOW_AUTO_LOGIN}
-    ports:
-      - "8080:7860"
-    depends_on:
-      - langflow-postgres
-    networks:
-      - internal_net
-      - web_net      
-
-  langflow-postgres:
-    image: postgres:16
-    environment:
-      POSTGRES_USER: ${LANGFLOW_POSTGRES_USER}
-      POSTGRES_PASSWORD: ${LANGFLOW_POSTGRES_PASSWORD}
-      POSTGRES_DB: ${LANGFLOW_POSTGRES_DB}
-    volumes:
-      - langflow-postgres-data:/var/lib/postgresql/data
-    networks:
-      - internal_net
-
-  # ==========================
-  # Bioinformatics Services
-  # ==========================
-
-  sequence-analysis:
-    image: j0pyter/sequence-analysis-service:1.0.0
-    restart: unless-stopped
-    ports:
-      - "8001:8000"
-    networks:
-      - internal_net
-
-
-  # ==========================
-  # Backend Infrastructure
-  # ==========================
-
-  backend-postgres:
+  postgres:
     image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${BACKEND_POSTGRES_USER}
-      POSTGRES_PASSWORD: ${BACKEND_POSTGRES_PASSWORD}
-      POSTGRES_DB: ${BACKEND_POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-gene_pilot}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
-      - backend-postgres-data:/var/lib/postgresql/data
-    networks:
-      internal_net:
-      web_net:
-        aliases:
-          - gene-pilot-backend-db
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-gene_pilot}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
@@ -96,34 +53,46 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-    networks:
-      - internal_net
 
   minio:
-    image: quay.io/minio/aistor/minio:latest
+    # Pin to a dated RELEASE tag once you have verified the tag exists on your
+    # registry mirror; `latest` is used here so a fresh clone always starts.
+    image: minio/minio:latest
     restart: unless-stopped
-    command: server /data --console-address ":9001" --license /minio.license
+    command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "${S3_PORT:-9000}:9000"
+      - "${S3_CONSOLE_PORT:-9001}:9001"
     volumes:
       - minio-data:/data
-      - ./cert/minio.license:/minio.license:ro
-    healthcheck:
-      test: ["CMD", "mc", "ready", "local"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+
   # One-shot: create the bucket and keep it private. Without this the bucket
   # does not exist and /storage/health reports STORAGE_UNAVAILABLE.
-    networks:
-      - internal_net
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"; do
+          echo "waiting for minio..."
+          sleep 2
+        done
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+        mc anonymous set none "local/$$S3_BUCKET"
+        mc ls "local/$$S3_BUCKET"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-minioadmin}
+      S3_BUCKET: ${S3_BUCKET:-genepilot}
+    restart: "no"
 
 volumes:
-  backend-postgres-data:
-  minio-data:
+  postgres-data:
   redis-data:
-  langflow-postgres-data:
+  minio-data:
