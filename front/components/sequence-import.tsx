@@ -20,13 +20,12 @@ type Tab = "file" | "paste";
 /**
  * Adds a sequence to a project.
  *
- * Three paths, because the backend offers three and they fail differently:
+ * Two paths, because they fail differently:
  *
- * - presign (default) sends the bytes straight to object storage. The row is
- *   created before the upload starts, so a failed PUT leaves a sequence whose
- *   `sequence_length` stays NULL — visible, and re-uploadable, rather than a
- *   silent gap.
- * - proxy pushes a small file through the backend, capped at 5 MiB.
+ * - proxy pushes a file through the backend, capped at 25 MiB. The browser
+ *   never touches object storage: a presigned URL minted for the server embeds
+ *   the loopback endpoint and is unusable from a browser. The sequence row is
+ *   created by the upload itself, so a failed request leaves no orphan row.
  * - paste registers metadata only. The backend does not parse the text, so the
  *   length and hash are computed here.
  */

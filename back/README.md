@@ -1,7 +1,8 @@
 # back
 
-Application API for Genomic Insight Agent. Elysia + Drizzle ORM + PostgreSQL, running on Bun
-next to Redis and MinIO on a single VPS.
+The API for **Gene Pilot**. Elysia + Drizzle ORM + PostgreSQL, running on Bun
+next to Redis and MinIO on a single VPS (or against the local Docker stack,
+see **Local stack**).
 
 ## Runtime entrypoints
 
@@ -16,6 +17,25 @@ services over `127.0.0.1`. `bun run dev` serves on `PORT` (default `4000`) and b
 
 Routes live in `src/routes/` and `src/app.ts` builds the Elysia instance once so the API and
 the worker share the same route definitions.
+
+## Executors
+
+An analysis runs through one of two executors; whichever one answered, the result lands in
+`result_json` in the same flat shape (see **Result normalisation**):
+
+- **Langflow** (primary). The worker POSTs to `<LANGFLOW_URL>/api/v1/run/<LANGFLOW_MAIN_FLOW_ID>`
+  with `x-api-key: LANGFLOW_API_KEY` and the sequence + analysis type delivered through the
+  `tweaks` of the flow's custom `BioAnalysisConnector`. `/run` is synchronous: it executes the
+  graph and returns `{ outputs, session_id }`. The connector's report
+  `{ user_question, analysis_results }` is extracted from the outputs.
+- **Bio Service** (deterministic fallback). `POST <BIO_SERVICE_URL>/analyze` with
+  `{ sequence, tools }`. Used when Langflow is disabled, unreachable, times out, or is
+  misconfigured — a fallback that is deliberately broad, because a deterministic GC count is
+  more useful than an error about a flow the user cannot see. Every fallback is logged.
+
+When `LANGFLOW_INSIGHT_FLOW_ID` is set, the worker makes a second, best-effort call with the
+connector's report and attaches the model's reply as `insight`. A failure there never fails
+the analysis. See `langflow/README.md` for the two flows and the custom components.
 
 ## Deployment topology
 
@@ -41,7 +61,7 @@ Consequences that the code depends on:
 - The API binds `127.0.0.1`, so nothing bypasses the tunnel. `HOST` overrides this if a host
   needs a different bind address; there is no reason to set it to `0.0.0.0` here.
 - PostgreSQL, Redis and MinIO stay on loopback too. No ports are published.
-- The frontend calls the API hostname from `NEXT_PUBLIC_API_URL` in `front/.env.example`.
+- The frontend calls the API hostname from `NEXT_PUBLIC_API_URL` in `front/.env.local`.
 - Production cookies are `Secure`, which the tunnel's TLS provides.
 - `CORS_ORIGINS` must list the frontend origin exactly. It cannot be `*`, because the browser
   refuses a wildcard on a credentialed request and the session cookie is the whole point.
@@ -81,48 +101,86 @@ must be a long-lived process behind a hostname.
 
 ## Local stack
 
-The repo root has a `docker-compose.yml` with Postgres, Redis, and MinIO:
+`docker-compose.local.yml` at the repo root starts Postgres, Redis, MinIO (with its bucket)
+and the Bio Service on localhost — no `.env` file needed for the stack itself:
 
 ```bash
-docker compose up -d          # start postgres, redis, minio, and create the bucket
-docker compose ps
-docker compose down           # stop, keep data
-docker compose down -v        # stop and delete data
+docker compose -f docker-compose.local.yml up -d
+docker compose -f docker-compose.local.yml ps
+docker compose -f docker-compose.local.yml down           # stop, keep data
+docker compose -f docker-compose.local.yml down -v        # stop and delete data
 ```
 
-To point the API at the local containers instead of the VPS, set
-`DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/gene_pilot`,
-`REDIS_URL=redis://127.0.0.1:6379`, `S3_ENDPOINT=http://127.0.0.1:9000`, and run
-`bun run db:migrate`.
+Credentials are baked in and must match the local `back/.env` block:
+
+| Service             | Endpoint                  | Credentials  |
+| ------------------- | ------------------------- | ------------ |
+| PostgreSQL          | `127.0.0.1:5432`          | `genepilot` / `genepilot`, db `gene_pilot` |
+| Redis               | `127.0.0.1:6379`          | —            |
+| MinIO               | `127.0.0.1:9000`, console `:9001` | `minioadmin` / `minioadmin` |
+| Bio Service         | `127.0.0.1:8001`          | —            |
+
+Then:
+
+```bash
+cp .env.example .env        # the example carries the ready-made local block
+bun install
+bun run db:migrate          # create the schema in the local Postgres
+bun run dev                 # API
+bun run worker:analysis     # worker, separate terminal
+```
+
+Langflow is optional locally (`LANGFLOW_ENABLED` defaults on, but an incomplete config falls
+back to the Bio Service cleanly). Leave the `LANGFLOW_*` variables unset for a local run with
+no AI interpretation.
 
 ## Environment
 
-| Variable               | Required | Purpose                                                          |
-| ---------------------- | -------- | ---------------------------------------------------------------- |
-| `DATABASE_URL`         | yes      | Postgres connection string.                                       |
-| `S3_ENDPOINT`          | storage  | S3-compatible endpoint, e.g. `http://127.0.0.1:9000` for MinIO.  |
-| `S3_BUCKET`            | storage  | Bucket name for research files.                                  |
-| `S3_ACCESS_KEY_ID`     | storage  | Access key. Safe to appear in a presigned URL credential scope.   |
-| `S3_SECRET_ACCESS_KEY` | storage  | Secret key. Never leaves the server.                             |
-| `S3_REGION`            | no       | Defaults to `us-east-1`.                                         |
-| `S3_FORCE_PATH_STYLE`  | no       | Defaults to path style, which MinIO requires.                    |
-| `REDIS_URL`            | queue    | Redis connection string for the BullMQ queue.                    |
-| `QUEUE_ATTEMPTS`       | no       | Job retry attempts. Defaults to `3`.                             |
-| `WORKER_CONCURRENCY`   | no       | Concurrent analysis jobs. Defaults to `2`.                        |
-| `ENQUEUE_PORT`         | no       | Serve `POST /enqueue` from the analysis worker when set.         |
-| `QUEUE_SECRET`         | see below| Shared secret for the enqueue service.                           |
-| `QUEUE_ENQUEUE_URL`    | no       | Base URL of a remote enqueue service. Optional split deployment. |
-| `BIO_SERVICE_URL`      | no       | Base URL of the Bio service. Analysis fails without it.          |
-| `PORT`                 | no       | API port. Defaults to `4000`.                                    |
-| `HOST`                 | no       | API bind address. Defaults to `127.0.0.1`.                      |
-| `CORS_ORIGINS`         | hosted   | Comma-separated exact frontend origins allowed to send the session cookie. No wildcard. |
-| `COOKIE_SAME_SITE`     | no       | `none` when the API is on a different site than the frontend. Defaults to `lax`. See the table above. |
-| `DEPLOY_RUNTIME`       | no       | Set to `vps` to force hosted behaviour without `NODE_ENV`.       |
-| `ALLOW_DEV_AUTH`       | no       | Enables the shared local identity outside development.           |
-| `DEV_USER_EMAIL`       | no       | Email of the local development identity. Default `developer@local.test`. |
-| `AUTH_SECRET`          | hosted   | HMAC key for session cookies. Min 32 chars, required in production. |
-| `SESSION_TTL_SECONDS`  | no       | Session lifetime in seconds. Defaults to 7 days.                 |
-| `PBKDF2_ITERATIONS`    | no       | Password hashing cost, 1000–2000000. Defaults to `210000`.       |
+| Variable                      | Required | Purpose                                             |
+| ----------------------------- | -------- | --------------------------------------------------- |
+| `DATABASE_URL`                | yes      | Postgres connection string.                          |
+| `AUTH_SECRET`                 | hosted   | HMAC key for session cookies. Min 32 chars.         |
+| `S3_ENDPOINT`                 | storage  | S3-compatible endpoint, e.g. `http://127.0.0.1:9000` for MinIO. |
+| `S3_BUCKET`                   | storage  | Bucket name for research files.                     |
+| `S3_ACCESS_KEY_ID`            | storage  | Access key.                                          |
+| `S3_SECRET_ACCESS_KEY`        | storage  | Secret key. Never leaves the server.                |
+| `S3_REGION`                   | no       | Defaults to `us-east-1`.                            |
+| `S3_FORCE_PATH_STYLE`         | no       | Defaults to path style, which MinIO requires.       |
+| `REDIS_URL`                   | queue    | Redis connection string for the BullMQ queue.       |
+| `ANALYSIS_QUEUE_NAME`         | no       | BullMQ queue name. **Unset in production.** Set it to a value no other host uses when a remote worker shares the same Redis, so local jobs stay on the local worker. |
+| `QUEUE_ATTEMPTS`              | no       | Job retry attempts. Defaults to `3`.                |
+| `WORKER_CONCURRENCY`          | no       | Concurrent analysis jobs. Defaults to `2`.           |
+| `WORKER_JOB_TIMEOUT_MS`       | no       | How long a run may hold a slot before the worker hands on. Defaults to `30000`. |
+| `WORKER_RECHECK_DELAY_MS`     | no       | Delay between re-check jobs. Defaults to `30000`.   |
+| `WORKER_MAX_RECHECKS`         | no       | Upper bound on re-checks before a run is failed. Defaults to `10`. |
+| `ENQUEUE_PORT`                | no       | Serve `POST /enqueue` from the analysis worker when set. |
+| `QUEUE_SECRET`                | see note | Shared secret for the enqueue service (mandatory when `ENQUEUE_PORT` or `QUEUE_ENQUEUE_URL` is set). |
+| `QUEUE_ENQUEUE_URL`           | no       | Base URL of a remote enqueue service. Optional split deployment. |
+| `BIO_SERVICE_URL`             | no       | Base URL of the Bio Service. Analysis fails without it. |
+| `BIO_SERVICE_TIMEOUT_MS`      | no       | Per-request timeout for the Bio Service call. Defaults to `60000`. |
+| `LANGFLOW_URL`                | langflow | Base URL of Langflow.                                |
+| `LANGFLOW_MAIN_FLOW_ID`       | langflow | Id of the "GenePilot Bio Connector" flow.            |
+| `LANGFLOW_COMPONENT_NAME`     | no       | Component receiving the analysis type via tweaks. Defaults to `"Bio Analysis Connector"`. |
+| `LANGFLOW_INSIGHT_FLOW_ID`    | no       | Id of the "GenePilot Insight Analyst" flow. Best-effort AI interpretation. |
+| `LANGFLOW_API_KEY`            | langflow | Server-side only; never expose it to the browser.    |
+| `LANGFLOW_TIMEOUT_MS`         | no       | Per-run timeout. Defaults to `120000`.               |
+| `LANGFLOW_ENABLED`            | no       | Kill switch; `"false"` routes every analysis straight to the Bio Service. Defaults to `true`. |
+| `LANGFLOW_CALLBACK_ENABLED`   | no       | Deferred: stays `"false"` and the callback endpoint returns `503`. |
+| `LANGFLOW_CALLBACK_SECRET`    | no       | Reserved for the same deferred callback model.       |
+| `LANGFLOW_FLOW_PROBE`         | no       | `"1"` makes `/health/dependencies` also fetch the configured flow, proving id + key. |
+| `PORT` / `HOST`               | no       | API port (default `4000`) and bind address (default `127.0.0.1`). |
+| `CORS_ORIGINS`                | hosted   | Comma-separated exact frontend origins. No wildcard. |
+| `COOKIE_SAME_SITE`            | no       | `none` when the API is on a different site than the frontend. Defaults to `lax`. |
+| `DEPLOY_RUNTIME`              | no       | `vps` forces hosted behaviour without `NODE_ENV`.    |
+| `ALLOW_DEV_AUTH`              | no       | Enables the shared local identity outside development. |
+| `DEV_USER_EMAIL`              | no       | Email of the local dev identity. Default `developer@local.test`. |
+| `SESSION_TTL_SECONDS`         | no       | Session lifetime. Defaults to 7 days.                |
+| `PBKDF2_ITERATIONS`           | no       | Password hashing cost, 1000–2000000. Defaults to `210000`. |
+| `DISPOSABLE_CHECK_ENABLED`    | no       | `"true"` rejects registration (and guest claims) on known disposable/temp-mail domains. Fail-open when unset. |
+| `ANALYSIS_ALLOWED_TYPES`      | no       | Comma-separated allowlist for `POST /analyses`. Defaults to the Bio tool set (see **Analysis types**). |
+| `RATE_LIMIT_*`                | no       | One rule per scope; `0` disables. See **Rate limiting**. |
+| `TRUSTED_IP_HEADER`           | hosted   | Header carrying the real client address, e.g. `cf-connecting-ip` behind cloudflared. Required by the login/register rules. |
+| `RATE_LIMIT_FALLBACK_TO_UNKNOWN` | no    | `"1"` accepts the shared bucket when no client address is available. Convenient locally, wrong in production. |
 
 Credentials belong in `back/.env` locally and in the process environment on the VPS. They are
 not bundled into any build output, because there is no build step.
@@ -130,19 +188,24 @@ not bundled into any build output, because there is no build step.
 A production deployment without `AUTH_SECRET` is not "insecurely open" — it fails closed with
 `401 UNAUTHENTICATED` on every data route.
 
-`QUEUE_SECRET` is mandatory whenever `ENQUEUE_PORT` or `QUEUE_ENQUEUE_URL` is set; the enqueue
-service refuses to start without it.
-
 ## Authentication
 
-Register, log in, and the session cookie are implemented. See `PLAN.md` §7 for the full rationale.
+The API issues `gia_session` cookies; there are also guest sessions and a guest-to-account
+claim:
 
-- `POST /auth/register` and `POST /auth/login` set a `gia_session` cookie: `HttpOnly`, `SameSite` from `COOKIE_SAME_SITE`, and `Secure` in production. The token is `v1.<payload>.<HMAC-SHA-256>` and is verified statelessly, so no session lookup is needed per request.
-- Passwords are hashed with PBKDF2-HMAC-SHA-512 (210k iterations by default) through Web Crypto, so there is no native binding to compile.
+- `POST /auth/register` and `POST /auth/login` set a `gia_session` cookie: `HttpOnly`, `SameSite`
+  from `COOKIE_SAME_SITE`, and `Secure` in production. The token is `v1.<payload>.<HMAC-SHA-256>`
+  and is verified statelessly.
+- `POST /auth/guest` creates a guest principal and its own cookie; the guest's work is kept
+  keyed to a client-held guest token, and `POST /guest/claim` moves it into a new account.
+- Passwords are hashed with PBKDF2-HMAC-SHA-512 (210k iterations by default) through Web Crypto.
 - `POST /auth/logout` expires the cookie. `GET /auth/me` reports the current account.
-- Login answers `Invalid email or password.` for both an unknown email and a wrong password, and spends the same PBKDF2 work either way, so neither the message nor the timing reveals whether an account exists.
-- **Local development:** with `ALLOW_DEV_AUTH=true` (or `bun run dev` without `NODE_ENV=production`), a session is used when present, otherwise the shared `DEV_USER_EMAIL` identity is upserted.
-- **Production:** the shared identity is only reachable when `ALLOW_DEV_AUTH` is explicitly enabled. Otherwise every data route returns `401 UNAUTHENTICATED`.
+- Login answers `Invalid email or password.` for both an unknown email and a wrong password,
+  and spends the same PBKDF2 work either way.
+- **Local development:** with `ALLOW_DEV_AUTH=true` (or dev without `NODE_ENV=production`), a
+  session is used when present, otherwise the shared `DEV_USER_EMAIL` identity is upserted.
+- **Production:** the shared identity is only reachable when `ALLOW_DEV_AUTH` is explicitly
+  enabled. Otherwise every data route returns `401 UNAUTHENTICATED`.
 
 Because production cookies are `Secure`, the API must be reached over HTTPS. Put TLS in front of
 it, or expose it through a tunnel that terminates TLS, before pointing a browser at it.
@@ -157,148 +220,145 @@ or role from the client, `object_key` can only be set by the storage endpoints, 
 
 ## Rate limiting
 
-Fixed-window counters held in Redis, applied to the endpoints that are either expensive or
-unbounded writers. The counters are **shared state** on purpose: an in-process `Map` would give
-each API instance its own budget, so the real limit would be the configured one multiplied by the
-number of processes, and a restart would hand everyone a fresh allowance.
+Fixed-window counters held in Redis, shared by every API process so the limit is the configured
+one rather than that times the number of instances. The limiter fails closed: if Redis is
+unreachable it answers `503 RATE_LIMIT_UNAVAILABLE` instead of waving traffic through.
 
-| Scope              | Keyed by     | Default  | Why                                       |
-| ------------------ | ------------ | -------- | ----------------------------------------- |
-| `auth.login`       | client       | 10 / 15m | Each attempt costs a 210k-iteration hash. |
-| `auth.register`    | client       | 5 / 1h   | One address creating many accounts.       |
-| `analysis.queue`   | session user | 30 / 1h  | Each is a row, a Redis entry, and a job.  |
-| `storage.presign`  | session user | 60 / 1h  | Writes a `sequences` row before upload.   |
-| `storage.upload`   | session user | 30 / 1h  | Real bytes to object storage.             |
-| `storage.mutate`   | session user | 60 / 1h  | Deletes, and the objects behind them.     |
+The rule names come from the `RATE_LIMITS` table in `src/lib/rate-limit.ts`; set any
+`RATE_LIMIT_*` to `0` to disable that rule and tune with the matching
+`RATE_LIMIT_*_WINDOW_SECONDS`. Authenticated scopes are keyed on the **session-derived user id**,
+never on anything the caller supplied. The client-address scopes (login, register, guest) key on
+`TRUSTED_IP_HEADER` when set, and return `503` for an unattributable caller otherwise — unless
+`RATE_LIMIT_FALLBACK_TO_UNKNOWN=1` collapses everyone into one shared bucket, which is convenient
+locally and wrong in production.
 
-Authenticated scopes are keyed on the **session-derived user id**, never on anything the caller
-supplied, so one account exhausting its budget cannot throttle another.
+| Scope | Keyed by | Default | Why |
+| ----- | -------- | ------- | --- |
+| `auth.login` | client | 10 / 15m | Each attempt costs a 210k-iteration hash. |
+| `auth.register` | client | 5 / 1h | One address creating many accounts. |
+| `auth.guest` | client | 10 / 1h | Each guest costs a row and a cookie. |
+| `analysis.queue` | session user | 30 / 1h | Each is a row, a Redis entry, and a job. |
+| `analysis.status_poll` | session user | 240 / 1m | The frontend polls status every ~2s while a run is active; this is the ceiling, the short-TTL Redis cache is the real flood defence. |
+| `storage.presign` | session user | 60 / 1h | Writes a `sequences` row before upload. |
+| `storage.upload` | session user | 30 / 1h | Real bytes to object storage. |
+| `storage.mutate` | session user | 60 / 1h | Deletes, and the objects behind them. |
 
-Set any `RATE_LIMIT_*` to `0` to disable that rule. Tune with the matching
-`RATE_LIMIT_*_WINDOW_SECONDS`.
-
-Two deliberate behaviours:
-
-- **It fails closed.** If Redis is unreachable the limiter cannot do its job, so the request is
-  refused with `503 RATE_LIMIT_UNAVAILABLE` rather than waved through. A limiter that fails open is
-  not a limiter. That code is distinct from a `429`, so the UI can tell "you are being throttled"
-  apart from "the throttle is broken".
-- **It refuses an unattributable caller.** The login and register rules need to know who is calling.
-  With no `TRUSTED_IP_HEADER` configured they return `503` instead of collapsing every caller into
-  one bucket, which would let a single noisy client throttle everyone. Locally, set
-  `RATE_LIMIT_FALLBACK_TO_UNKNOWN=1` to accept the shared bucket — convenient, wrong in production.
-
-`429` responses carry a `Retry-After` header and `details.retryAfter` in the body.
-
-The window is fixed, not sliding: retries inside a window do not extend it, so a client that keeps
-hammering is still let go when the window ends.
+`429` responses carry a `Retry-After` header and `details.retryAfter` in the body. The window is
+fixed, not sliding: retries inside a window do not extend it.
 
 ## Analysis types
 
-`POST /analyses` validates `analysisType` against a closed set. It used to accept any 1–64 character
-string and forward it verbatim to the analysis service, which meant the value an internal service
-was handed had effectively been chosen by the client. An unknown type is now a `422`, raised before
-any row is written.
+`POST /analyses` validates `analysisType` against a closed set — an unknown type is a `422`,
+raised before any row is written. The value is lowercased, so `GC_Content` and `gc_content` are
+one analysis.
 
-Defaults live in `back/src/lib/analysis-types.ts` and come from AGENTS.md §4.10. Override with
-`ANALYSIS_ALLOWED_TYPES=gc_content,orfs,blast`. An empty or malformed value falls back to the
-defaults rather than rejecting everything, so a missing config cannot end up wide open.
+Defaults live in `src/lib/analysis-types.ts` and mirror the Bio Service's `available_tools`:
+
+```
+gc_content                  sequence_statistics
+at_content                  detect_sequence_type
+composition                 extract_sequence_features
+orfs                        validate_sequence
+translate                   parse_fasta
+```
+
+`at_content` is derived (AT% = A% + T%) off `calculate_nucleotide_composition`. Override with
+`ANALYSIS_ALLOWED_TYPES=gc_content,orfs,translate`. An empty or malformed value falls back to
+the defaults rather than rejecting everything, so a missing config cannot end up wide open.
+
+## Result normalisation
+
+Both executors return differently wrapped payloads, so `src/lib/normalize-result.ts` rewrites
+either into one flat shape before it is stored as `result_json`:
+
+- Bio Service `{ source, results: { <tool>: {...} } }` is flattened per tool.
+- Langflow outputs are scanned for the connector's `{ user_question, analysis_results }` report;
+  anything that is not JSON becomes `insight`.
+
+Known tools are lifted to named fields (`gc_content`, `composition`, `orfs`, `translation`,
+`sequence_statistics`, `sequence_type`, `sequence_features`, `validation`, `fasta`);
+`parse_fasta` records keep only `id`, `length` and `description` — the echoed residue text is
+dropped so a parsed genome does not inline megabytes into the row. Unrecognised tools pass
+through under their service names. `source` is preserved so logs and tests can tell which
+executor ran. See `front/lib/result.ts` for the reader that consumes this contract, and
+`bun test __tests__/lib/normalize-result.test.ts` for the pinned shapes.
 
 ## Importing guest history
 
-`POST /guest/import` moves a guest's IndexedDB history into their new account, so registering
-does not throw away prior work.
+`POST /guest/import` moves a guest's IndexedDB history (sent from the client by guest token id)
+into the authenticated account, so registering does not throw away prior guest work.
 
 - Requires a session: the payload is only accepted for the authenticated account.
-- Send the UUIDs the browser already assigned. Re-running the import is safe: every insert is `on conflict do nothing`, so a retry after a partial failure converges instead of duplicating.
-- Nest the payload as projects → sequences → analyses, with conversations alongside sequences:
-
-  ```json
-  {
-    "projects": [
-      {
-        "id": "uuid",
-        "name": "Mito study",
-        "sequences": [
-          {
-            "id": "uuid",
-            "format": "fasta",
-            "recordId": "NC_000001",
-            "sequenceLength": 16641,
-            "analyses": [
-              { "id": "uuid", "sequenceId": "uuid", "analysisType": "gc_content", "resultJson": { "gc": 42.5 } }
-            ]
-          }
-        ],
-        "conversations": [{ "id": "uuid", "role": "user", "content": "what is the GC content?" }]
-      }
-    ]
-  }
-  ```
-
-- Each project commits in its own transaction, so one bad record cannot leave a half-imported project. Earlier projects stay committed and the error names the failing index, which is what makes a targeted retry safe.
-- `userId`, `objectKey`, and `queueJobId` are rejected with `422`. Each is declared on the level it belongs to: `userId` on the project, `objectKey` on the sequence, `queueJobId` on the analysis. A guest has no bucket and no queue, so an imported analysis can only be `completed` or `failed`; anything else lands as `failed` rather than implying a job that does not exist.
-- Bounded at 50 projects, 200 sequences per project, 100 analyses per sequence, 500 conversations per project, 64 KB per analysis result.
+- Send the UUIDs the browser already assigned. Re-running the import is safe: every insert is
+  `on conflict do nothing`.
+- Each project commits in its own transaction, so one bad record cannot leave a half-imported
+  project; the error names the failing index, which makes a targeted retry safe.
+- `userId`, `objectKey`, and `queueJobId` are rejected with `422`. An imported analysis can only
+  be `completed` or `failed`; anything else lands as `failed`.
+- Bounded at 50 projects, 200 sequences per project, 100 analyses per sequence, 500
+  conversations per project, 64 KB per analysis result.
 
 ## Endpoints
 
-| Method | Path                             | Description                                        |
-| ------ | -------------------------------- | -------------------------------------------------- |
-| GET    | `/health`                        | Liveness plus a database connectivity probe.       |
-| POST   | `/auth/register`                 | Create an account and set the session cookie.      |
-| POST   | `/auth/login`                    | Set the session cookie.                            |
-| POST   | `/auth/logout`                   | Expire the session cookie.                         |
-| GET    | `/auth/me`                       | Current account, or `401`.                         |
-| POST   | `/guest/import`                  | Import guest IndexedDB history (session required). |
-| POST   | `/projects`                      | Create a project.                                   |
-| GET    | `/projects`                      | List owned projects.                                |
-| GET    | `/projects/:id`                  | Fetch one owned project.                            |
-| POST   | `/projects/:id/sequences`        | Register a metadata-only sequence (pasted text).    |
-| GET    | `/projects/:id/sequences`        | List sequences in a project.                        |
-| POST   | `/analyses`                      | Queue an analysis; returns `202` immediately.       |
-| GET    | `/queue/status`                  | Queue depth and worker reachability.                |
-| GET    | `/analyses/:id`                  | Fetch one analysis.                                 |
-| GET    | `/analyses/:id/status`           | Poll analysis status.                               |
-| POST   | `/conversations`                 | Append a conversation message.                      |
-| GET    | `/conversations/:projectId`      | List conversation messages for a project.           |
-| GET    | `/storage/health`                | Bucket reachability probe.                          |
-| POST   | `/storage/presign`               | Mint a presigned `PUT` and register the sequence.   |
-| POST   | `/storage/upload`                | Proxy a small multipart upload through the backend. |
-| GET    | `/storage/*`                     | Mint a presigned `GET` for an owned object.         |
-| DELETE | `/storage/*`                     | Delete an owned object and detach it.               |
+| Method | Path                                  | Description                                        |
+| ------ | ------------------------------------- | --------------------------------------------------- |
+| GET    | `/health`                             | Liveness plus a database connectivity probe.       |
+| GET    | `/health/dependencies`                | Executor readiness (Bio, Langflow, queue).         |
+| POST   | `/auth/register`                      | Create an account and set the session cookie.      |
+| POST   | `/auth/login`                         | Set the session cookie.                            |
+| POST   | `/auth/guest`                         | Create a guest principal and set its cookie.       |
+| POST   | `/guest/claim`                        | Move guest work into the signed-in account.        |
+| POST   | `/auth/logout`                        | Expire the session cookie.                         |
+| GET    | `/auth/me`                            | Current account, or `401`.                         |
+| POST   | `/guest/import`                       | Import guest IndexedDB history (session required). |
+| POST   | `/projects`                           | Create a project.                                  |
+| GET    | `/projects`                           | List owned projects.                               |
+| GET    | `/projects/:id`                       | Fetch one owned project.                           |
+| POST   | `/projects/:id/sequences`             | Register a metadata-only sequence (pasted text).   |
+| GET    | `/projects/:id/sequences`             | List sequences in a project.                       |
+| DELETE | `/projects/:id/sequences/:sequenceId` | Delete a sequence: drops its jobs, deletes the object best-effort, row delete cascades the analyses. |
+| POST   | `/analyses`                           | Queue an analysis; returns `202` immediately.      |
+| GET    | `/analyses/:id`                       | Fetch one analysis.                                |
+| GET    | `/analyses/:id/status`                | Poll analysis status (cached, short TTL).          |
+| DELETE | `/analyses/:id`                       | Delete an analysis, discarding its queued job.     |
+| GET    | `/queue/status`                       | Queue depth and worker reachability (public).      |
+| POST   | `/conversations`                      | Append a conversation message.                     |
+| GET    | `/conversations/:projectId`           | List conversation messages for a project.          |
+| GET    | `/storage/health`                     | Bucket reachability probe (bucket name withheld from anonymous callers). |
+| POST   | `/storage/upload`                     | Proxy a multipart upload through the backend (≤ 25 MiB). The canonical upload path. |
+| GET    | `/storage/download/*`                 | Stream an owned object through the backend for download. The canonical download path. |
+| POST   | `/storage/presign`                    | Legacy: mint a presigned `PUT` and register the sequence. |
+| GET    | `/storage/*`                          | Legacy: mint a presigned `GET` for an owned object. |
+| DELETE | `/storage/*`                          | Legacy: delete an owned object and detach it from its sequence. |
 
 Successful responses are `{ "data": ... }`. Errors are `{ "error": { "code", "message", "details"? } }`
 with `404` for missing or unowned resources, `413` for oversized bodies or files, `422` for
 validation failures, `429` when a rate limit is hit, `503` when the queue, rate limiter or object
 storage is unavailable, and `401` when auth is required.
 
-## Uploading a research file
+## Uploading and downloading a research file
 
-`POST /storage/presign` is the canonical path for file-backed sequences. It records the
-`object_key` at presign time (the optimistic variant described in `PLAN.md` §5), so the row
-exists before the browser uploads. `sequence_length` and `sequence_hash` stay `NULL` until the
-Bio service parses the file.
+The browser never talks to MinIO. Presigned URLs embed the loopback endpoint the backend sees
+(`S3_ENDPOINT` is `http://127.0.0.1:9000` inside the host) and SigV4 covers that host, so a URL
+minted for the server is useless to a browser — which is why upload and download are both
+proxied through the API:
 
 ```text
-POST /storage/presign  { projectId, filename, contentType?, sizeBytes? }
-  -> 201 { sequenceId, objectKey, method: "PUT", uploadUrl, expiresIn: 900 }
+POST /storage/upload            multipart/form-data: projectId, filename, file, description?
+  -> 201 { sequenceId, objectKey, sizeBytes }
 
-PUT <uploadUrl>  (browser uploads the file directly to object storage)
-
-GET /storage/<objectKey>
-  -> 200 { objectKey, downloadUrl, expiresIn: 900, sequence }
+GET /storage/download/<objectKey>   (session required, ownership checked)
+  -> 200 stream, content-disposition: attachment
 ```
 
-Presigned URLs live 15 minutes. Because the signature covers only the `host` header, the browser
-may send whatever `Content-Type` it derives from the `File`.
+`POST /storage/upload` is capped at 25 MiB (rejected on `Content-Length` before the body is
+buffered, with slack for multipart framing). The sequence row is created by the upload itself,
+so a failed request leaves no orphan row. Delete a file-backed sequence with
+`DELETE /projects/:id/sequences/:sequenceId`, which drops its analyses' jobs, deletes the object
+best-effort, and removes the row (analyses cascade).
 
-`POST /storage/upload` takes `multipart/form-data` with `projectId`, `filename`, and `file`, and
-is capped at 5 MiB. Direct presigned uploads are capped at 100 MiB. Allowed extensions:
-`.fasta`, `.fa`, `.fna`, `.gb`, `.gbk`, `.genbank`, `.txt`, `.csv`, `.tsv`, `.json`, `.pdf`.
-
-Note that a presigned `PUT` is not size-enforced server-side — the declared `sizeBytes` is
-validated, but a client can still send a different body. Enforcing a hard limit requires a
-bucket policy.
+The legacy `presign` / `GET /storage/*` / `DELETE /storage/*` routes are still registered — new
+code should not use them, and the frontend no longer does.
 
 ## Analysis queue
 
@@ -317,9 +377,9 @@ Status moves `queued -> processing -> completed | failed`. A worker records the 
 on every failed attempt, so a job that exhausts its retries still leaves an explanation behind.
 
 If Redis is unreachable, submission returns `503 QUEUE_UNAVAILABLE` and the row is moved to
-`failed` rather than being left in `queued`. The response includes `error.details.analysisId` so
-the client can surface that failed attempt. If the queue is not configured at all, the request
-fails fast with `503 QUEUE_NOT_CONFIGURED` and no row is created.
+`failed` rather than left in `queued`; the response carries `details.analysisId`. If the queue
+is not configured at all, the request fails fast with `503 QUEUE_NOT_CONFIGURED` and no row is
+created.
 
 The consumer is a long-lived process, started the same way as the API:
 
@@ -327,9 +387,17 @@ The consumer is a long-lived process, started the same way as the API:
 bun run worker:analysis
 ```
 
-The API writes to Redis directly, because both processes run on the same host. If they are ever
-split across machines, the worker can host a small enqueue service and the API posts to it
-instead:
+Queue name: `ANALYSIS_QUEUE` defaults to `genomic-analysis`. Set `ANALYSIS_QUEUE_NAME` to a
+different value in local `back/.env` when a remote worker shares the same Redis — BullMQ serves
+the longest-waiting blocked worker, so a stale host wins every job. **Never set it in
+production.**
+
+A run that outlives `WORKER_JOB_TIMEOUT_MS` stops holding a worker slot and is given back to a
+delayed re-check job (`WORKER_RECHECK_DELAY_MS`), bounded by `WORKER_MAX_RECHECKS`, so a dead
+Langflow run fails instead of pinning a worker forever.
+
+If the API and worker are ever split across machines, the worker can host a small enqueue
+service and the API posts to it instead:
 
 ```bash
 # on the worker
@@ -342,17 +410,25 @@ QUEUE_ENQUEUE_URL=http://127.0.0.1:4010 QUEUE_SECRET=... bun run src/index.ts
 ```text
 API     -> POST <QUEUE_ENQUEUE_URL>/enqueue   (x-queue-secret: QUEUE_SECRET)
 Service -> BullMQ enqueue -> Redis
-Worker  -> BullMQ consumer -> Bio Service
+Worker  -> BullMQ consumer -> executor (Langflow, falling back to Bio)
 ```
 
 ## Tests
 
-Tests run against a real, already-running API plus the real database, Redis and MinIO. Start the
-API in production mode first, on a port that is not your dev server:
+Unit tests (`__tests__/lib/`) run without any services. The API tests (`__tests__/api/`) run
+against a real, already-running API plus the real database, Redis and MinIO. Start the API in
+production mode first, on a port that is not your dev server:
 
 ```bash
-NODE_ENV=production PORT=4100 bun run src/index.ts
+NODE_ENV=production PORT=4100 RATE_LIMIT_AUTH_REGISTER=0 RATE_LIMIT_AUTH_LOGIN=0 \
+RATE_LIMIT_AUTH_GUEST=0 RATE_LIMIT_ANALYSIS_QUEUE=0 RATE_LIMIT_ANALYSIS_STATUS_POLL=0 \
+RATE_LIMIT_STORAGE_PRESIGN=0 RATE_LIMIT_STORAGE_UPLOAD=0 RATE_LIMIT_STORAGE_MUTATE=0 \
+  bun run src/index.ts
 ```
+
+`NODE_ENV=production` matters: it disables the development identity fallback, so the fail-closed
+auth tests actually exercise signature rejection. `RATE_LIMIT_*=0` skips a rule entirely,
+including the caller-identity requirement, so the tests do not need `TRUSTED_IP_HEADER` set.
 
 Then run the suite:
 
@@ -360,53 +436,7 @@ Then run the suite:
 TEST_API_URL=http://127.0.0.1:4100 bun test
 ```
 
-`NODE_ENV=production` matters: it disables the development identity fallback, so the fail-closed
-auth tests actually exercise signature rejection instead of silently falling back to the shared
-local user.
-
-Disable the rate limits for the run as well. The suite registers a user per test and every
-`createClient()` call is a fresh account, so a real budget is exhausted within a few passes — and
-because the tests all come from one address, they also share one bucket:
-
-```bash
-RATE_LIMIT_AUTH_REGISTER=0 RATE_LIMIT_AUTH_LOGIN=0 RATE_LIMIT_ANALYSIS_QUEUE=0 \
-RATE_LIMIT_STORAGE_PRESIGN=0 RATE_LIMIT_STORAGE_UPLOAD=0 RATE_LIMIT_STORAGE_MUTATE=0 \
-  bun run src/index.ts
-```
-
-`RATE_LIMIT_*=0` skips a rule entirely, including the caller-identity requirement, so the tests
-do not need `TRUSTED_IP_HEADER` set. See **Rate limiting** below for the production values.
-
-Two tests reach external services and carry raised timeouts for that reason: the object-storage
-round trip and anything that submits an analysis. Both talk to the VPS over the network, so they
-can exceed Bun's 5s default on a slow link.
-
-One caveat worth knowing when reading failures: this Redis is shared with the deployed worker, and
-`queue.test.ts` asserts on rows in the shared queue. The worker can move a freshly submitted job
-to `processing` or `failed` before the test reads it back — in this deployment it does, because
-`BIO_SERVICE_URL` is unset and every job fails fast. So the suite asserts a job is *in* the
-lifecycle and that its `queue_job_id` is set, rather than pinning the exact status. A `failed`
-there is expected, not a regression.
-
-Layout mirrors the other project in this workspace:
-
-```
-__tests__/
-  helpers/
-    client.ts     cookie jar, request helper, user/project/sequence factories
-    db.ts         read-only postgres probes that confirm rows really landed
-    fixtures.ts   nested guest-import payload builder
-    setup.ts      readiness assertion and database lifecycle
-  api/
-    auth.test.ts
-    guest.test.ts
-    projects.test.ts
-    storage.test.ts
-    queue.test.ts
-```
-
-The database probes are deliberately read-only. These tests run against a database that holds
-real data, so nothing truncates a table; assertions count rows by their known ids instead.
+With the local docker stack up, `bun test __tests__/lib/` is green with no other setup.
 
 ## Scripts
 
@@ -414,12 +444,18 @@ real data, so nothing truncates a table; assertions count rows by their known id
 bun run dev              # local API with watch mode
 bun run start            # run the API once
 bun run worker:analysis  # BullMQ analysis worker (long-lived)
-bun test                 # integration tests against a running API
+bun test                 # test suites (see Tests)
 bun run typecheck        # tsc --noEmit
 bun run db:generate      # generate a migration from the schema
 bun run db:migrate       # apply migrations
 bun run db:studio        # Drizzle Studio
+bun run scripts/check-dependencies.ts   # probe Bio/Langflow/queue readiness
+bun run scripts/check-poll-budget.ts    # rate-limit budget sanity check
 ```
+
+There are also read-only operational scripts in `scripts/`: `backfill-normalize-results.ts`
+(rewrites existing rows to the flat `result_json` contract), `smoke-bio-executor.ts` /
+`smoke-langflow-executor.ts`, `verify-sequence-content.ts`, and `db-backup.ts`.
 
 ## Running under PM2 on the VPS
 
@@ -459,4 +495,5 @@ that already exist in `process.env`, so the `env` block there wins for operation
 
 If `pm2 start` reports the process as `errored` with no output, PM2 is not resolving the Bun
 interpreter. Check `which bun`, and fall back to running the entrypoint directly with
-`script: "bun"` plus `args: "run src/index.ts"`.
+`script: "bun"` plus `args: "run src/index.ts"`. Production env is documented in the gitignored
+`.env.production` (values land in the process environment on the VPS).
