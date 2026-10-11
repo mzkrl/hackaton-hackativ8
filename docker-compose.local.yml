@@ -1,0 +1,93 @@
+name: gene-pilot-local
+
+# Local development datastores.
+#
+# This is the stack "how to run locally" in the root README points at. It is a
+# trimmed, self-contained version of docker-compose.yml (which is the VPS stack
+# and needs the external web_net network, a MinIO AIStor license and the
+# Langflow services). Nothing here needs an .env file: credentials are baked in
+# and must match what back/.env uses.
+#
+#   docker compose -f docker-compose.local.yml up -d
+#   docker compose -f docker-compose.local.yml down         # stop, keep data
+#   docker compose -f docker-compose.local.yml down -v      # stop and wipe
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: genepilot
+      POSTGRES_PASSWORD: genepilot
+      POSTGRES_DB: gene_pilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U genepilot -d gene_pilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    # appendonly keeps queued jobs across restarts; maxmemory-policy noeviction
+    # is required so BullMQ never silently drops a queued job.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: create the S3 bucket the backend expects. The backend only probes
+  # the bucket (HeadBucket), it never creates it, so without this every storage
+  # call fails with STORAGE_UNAVAILABLE.
+  minio-init:
+    image: minio/mc:latest
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - /bin/sh
+      - -c
+      - mc alias set local http://minio:9000 minioadmin minioadmin && mc mb --ignore-existing local/genepilot
+
+  # The FastAPI "Sequence Analysis Service" (Bio Service). The backend POSTs to
+  # <URL>/analyze as the deterministic executor, so analyses work without
+  # Langflow.
+  sequence-analysis:
+    image: j0pyter/sequence-analysis-service:1.0.0
+    restart: unless-stopped
+    ports:
+      - "8001:8000"
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
